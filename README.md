@@ -325,7 +325,6 @@ This software, including all source code, documentation, assets, architecture sp
 ### Contact
 
 For inquiries or report :
-
 **Email:** support@mahaswarna.com · 
 **Website:** https://www.mahaswarna.in
 
