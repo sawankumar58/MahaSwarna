@@ -53,15 +53,15 @@ The architecture targets **10,000 DAU** on a single Hetzner CPX41 node (~₹6,00
 
 | Feature | Description |
 |---|---|
-| 📡 **Live Rates** | Gold and silver spot prices for 61 Indian cities, streamed via WebSocket |
-| 🤖 **AI-Powered Pricing** | Gemini generates rates hourly during IST market hours (Mon–Sat, 10:00–19:00) |
-| 🔔 **Price Alerts** | Push notifications when gold or silver crosses a user-defined threshold |
-| 🧮 **Calculator** | Buy/sell calculator with making charges, GST, and INR formatting (lakh/crore) |
-| 💎 **Jewellery Catalog** | Full-text search and region-aware AI recommendations with offline browse cache |
-| 🧾 **Shopkeeper Billing** | PDF invoice generation with shop branding and rate-source warnings |
-| 📒 **Diary** | Local-only bills ledger, customer management, and transaction history (FTS4 search) |
-| 🏪 **Marketplace** | Shop registration and S3-backed banner upload with Gemini Vision content moderation |
-| 💳 **Subscriptions** | Google Play Billing 7 with Play Integrity attestation on login and purchase |
+| **Live Rates** | Gold and silver spot prices for 61 Indian cities, streamed via WebSocket |
+| **AI-Powered Pricing** | Gemini generates rates hourly during IST market hours (Mon–Sat, 10:00–19:00) |
+| **Price Alerts** | Push notifications when gold or silver crosses a user-defined threshold |
+| **Calculator** | Buy/sell calculator with making charges, GST, and INR formatting (lakh/crore) |
+| **Jewellery Catalog** | Full-text search and region-aware AI recommendations with offline browse cache |
+| **Shopkeeper Billing** | PDF invoice generation with shop branding and rate-source warnings |
+| **Diary** | Local-only bills ledger, customer management, and transaction history (FTS4 search) |
+| **Marketplace** | Shop registration and S3-backed banner upload with Gemini Vision content moderation |
+| **Subscriptions** | Google Play Billing 7 with Play Integrity attestation on login and purchase |
 
 ---
 
@@ -69,32 +69,32 @@ The architecture targets **10,000 DAU** on a single Hetzner CPX41 node (~₹6,00
 
 ```
 ┌──────────────────────────────────────────────────┐
-│          Android Client  (Kotlin / Compose)       │
-│   Hilt · Room · OkHttp 5 · Retrofit 3 · Coil    │
+│          Android Client  (Kotlin / Compose)               │
+│   Hilt · Room · OkHttp 5 · Retrofit 3 · Coil              │
 └─────────────────────┬────────────────────────────┘
                       │  HTTPS / WSS
-┌─────────────────────▼────────────────────────────┐
-│           API Gateway  :4000  (Go / chi)          │
-│  JWT pre-validation · BFF aggregation             │
-│  Rate limiting · Circuit breakers · Abuse detect  │
+┌─────────────────────▼───────────────────────────┐
+│           API Gateway  :4000  (Go / chi)                  │
+│  JWT pre-validation · BFF aggregation                     │
+│  Rate limiting · Circuit breakers · Abuse detect.         │
 └──────┬───────────────┬──────────────┬────────────┘
-       │               │              │
+        │                  │                │
   :4001 core      :4002 pricing   :4003 intelligence
   auth/identity   rates/WS        catalog/marketplace
   billing/IAP     Gemini AI       invoices/shop
   alerts/push     rate watchdog   content moderation
        │               │              │
        └───────────────┴──────────────┘
-                       │
+                          │
           ┌────────────▼─────────────┐
-          │       PostgreSQL 15       │
-          │   LISTEN/NOTIFY event bus │
+          │       PostgreSQL 15           │
+          │   LISTEN/NOTIFY event bus.    │
           └────────────┬─────────────┘
                        │
           ┌────────────▼──────────────────────┐
-          │   Redis Sentinel  (3-node)         │
-          │   rate cache · JTI revocation      │
-          │   WS fanout · session state        │
+          │   Redis Sentinel  (3-node)              │
+          │   rate cache · JTI revocation           │
+          │   WS fanout · session state             │
           └───────────────────────────────────┘
 ```
 
@@ -322,59 +322,11 @@ Copyright © 2025 MahaSwarna. All Rights Reserved.
 
 This software, including all source code, documentation, assets, architecture specifications, and associated materials (collectively, the "Software"), is the exclusive proprietary property of MahaSwarna and is protected by copyright law and international treaty provisions.
 
-**No part of this Software may be:**
-
-- Copied, reproduced, or duplicated in any form or by any means
-- Modified, adapted, translated, or created into derivative works
-- Distributed, published, sublicensed, sold, or transferred to any third party
-- Reverse engineered, decompiled, disassembled, or otherwise reduced to human-readable form
-- Used to train, fine-tune, or otherwise develop any machine learning model or AI system
-
-without the express prior written permission of MahaSwarna.
-
-### Permitted Use
-
-Access to this Software is granted solely to:
-
-- **Authorised employees and contractors** of MahaSwarna, for the purpose of developing, maintaining, and operating the MahaSwarna platform
-- **Auditors and legal counsel** engaged by MahaSwarna, under a signed Non-Disclosure Agreement, for the purpose of compliance review
-
-Any use outside the scope defined above is strictly prohibited.
-
-### Third-Party Components
-
-This Software incorporates third-party open-source components, each governed by its own license. A full inventory is maintained in:
-
-- **Backend:** `licenses/backend/THIRD_PARTY_NOTICES.txt`
-- **Android:** `licenses/android/THIRD_PARTY_NOTICES.txt`
-
-### Confidentiality
-
-The Software contains trade secrets and confidential business information belonging to MahaSwarna. Recipients must maintain strict confidentiality and must not disclose any portion of it to any third party without prior written consent.
-
-### No Warranty
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, OR NON-INFRINGEMENT.
-
-### Limitation of Liability
-
-IN NO EVENT SHALL MAHASWARNA BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, LOSS OF DATA, LOSS OF PROFITS, OR BUSINESS INTERRUPTION) ARISING OUT OF OR IN CONNECTION WITH THE USE OR INABILITY TO USE THE SOFTWARE.
-
-### Governing Law
-
-This license is governed by the laws of **India**. Any disputes shall be subject to the exclusive jurisdiction of the courts of **Maharashtra, India**.
-
 ### Contact
 
-For licensing inquiries or to report unauthorised use:
-**Email:** legal@mahaswarna.com · **Website:** https://mahaswarna.com
+For inquiries or report :
+**Email:** support@mahaswarna.com · **Website:** https://www.mahaswarna.com
 
 > *Unauthorised use, reproduction, or distribution of this Software may result in severe civil and criminal penalties and will be prosecuted to the maximum extent possible under applicable law.*
 
----
-
-<div align="center">
-
-Built for the Indian jewellery trade · Android only · IST-native · INR-formatted
-
-</div>
+--- 
