@@ -327,7 +327,7 @@ This software, including all source code, documentation, assets, architecture sp
 For inquiries or report :
 
 **Email:** support@mahaswarna.com · 
-**Website:** https://www.mahaswarna.com
+**Website:** https://www.mahaswarna.in
 
 > *Unauthorised use, reproduction, or distribution of this Software may result in severe civil and criminal penalties and will be prosecuted to the maximum extent possible under applicable law.*
 
