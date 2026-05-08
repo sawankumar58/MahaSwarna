@@ -1026,7 +1026,11 @@ src/gateway/
 │                                        # POST /shops/:id/invoice/generate   → intelligence :4003
 │
 ├── bff/
-│   └── home_aggregator.go               # fan-out (errgroup): pricing + core(alerts) + intelligence(shops)
+│   └── home_aggregator.go               # fan-out (errgroup): pricing + core(alerts)
+│                                        # SCOPE: rates + alerts ONLY — shop data is intentionally excluded.
+│                                        # Clients fetch shop data via GET /shops when ShopBanner is accessed.
+│                                        # (Old comment listed intelligence(shops) as a third fan-out target —
+│                                        #  that design was superseded by GAP-M7; do not re-add shop data here)
 │                                        #
 │                                        # BFF CACHE SPLIT — named functions (implement exactly as specified):
 │                                        #
@@ -2426,7 +2430,7 @@ src/shared/
 | `INTERNAL_JWT_SECRET` | Service-to-service HMAC-SHA256 token signing (≥64 chars) |
 | `GOOGLE_PLAY_PACKAGE_NAME` | IAP validation (Android only) |
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | Play Developer API auth |
-| `GEMINI_API_KEY` | Gemini API — server only, never sent to client |
+| `GEMINI_API_KEY` | `pricing`, `intelligence` | Gemini API — server only, never sent to client. `pricing` uses it for AI rate generation (`ai_rate_scheduler_job.go`); `intelligence` uses it for Gemini Vision content moderation (`moderation_client.go`, banner upload only). Both services must be restarted when this key is rotated. |
 | `S3_BUCKET` | Shop banner + backup storage |
 | `S3_ENDPOINT` | S3-compatible storage endpoint (AWS S3 in production; MinIO for local dev). If using Hetzner Object Storage instead of AWS S3, omit `KMS_KEY_ARN` and use Hetzner's server-side encryption; update `backup_postgres.sh` accordingly. |
 | `KMS_KEY_ARN` | AWS KMS key for PostgreSQL backup encryption — **only required when `S3_ENDPOINT` points to AWS S3**. If using Hetzner Object Storage or another S3-compatible provider, remove this var and use provider-native encryption in `backup_postgres.sh`. |

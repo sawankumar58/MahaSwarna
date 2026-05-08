@@ -239,12 +239,12 @@ Tests use the `testing` stdlib with `testcontainers-go` for real Postgres and Re
 
 | Package | Key Coverage |
 |---|---|
-| `test/core/` | Login, refresh, account deletion (dual-fire compliance), consent idempotency, receipt state machine |
+| `test/core/` | Login, refresh, account deletion (dual-fire + idempotency compliance — three test cases per `SECURITY.md`), consent idempotency, receipt state machine |
 | `test/pricing/` | Rate use cases, AI scheduler, staleness and sanity watchdog |
 | `test/intelligence/` | Catalog search, shop registration, invoice generation (all rate source paths) |
 | `test/gateway/` | BFF aggregation, circuit breaker, fallback cache, abuse detection |
 
-> **Compliance gate:** `delete_account_usecase_test.go` must exist and cover both fire paths (user-initiated + `hard_delete_job`). CI fails if this file is absent — it is a compliance invariant, not optional coverage.
+> **Compliance gate:** `delete_account_usecase_test.go` must exist and cover all three test cases: Test A (user-initiated fire), Test B (system-initiated hard-delete), and Test C (double-fire idempotency). CI fails if this file is absent — it is a compliance invariant, not optional coverage. See `SECURITY.md — Compliance Requirements` for the full specification.
 
 ### Android Test Strategy
 
@@ -325,8 +325,7 @@ This software, including all source code, documentation, assets, architecture sp
 ### Contact
 
 For inquiries or report :
-**Email:** support@mahaswarna.com · 
-**Website:** https://www.mahaswarna.in
+**Email:** support@mahaswarna.com · **Website:** https://www.mahaswarna.com
 
 > *Unauthorised use, reproduction, or distribution of this Software may result in severe civil and criminal penalties and will be prosecuted to the maximum extent possible under applicable law.*
 

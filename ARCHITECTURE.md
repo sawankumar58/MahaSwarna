@@ -116,7 +116,7 @@ Validated load targets: **10k DAU**, peak concurrent ~1,200–1,500 (9–11 AM I
 | Peak concurrent WebSocket connections | ~600–900 | ~60% of concurrent users hold a live WS |
 | REST API peak RPS | ~80–120 | 1,200 users × ~4 req/min ÷ 60 |
 | BFF `/bff/home` peak RPS | ~25–40 | Launch burst during morning market open |
-| DB concurrent connections needed | ~60–80 | 4 services × 15–20 pool slots each |
+| DB concurrent connections needed | ~60–80 (burst ceiling) | 4 services × 15–20 pool slots each — see note below |
 | Redis peak ops/sec | ~5,000–8,000 | WS fanout + cache reads + rate limiter |
 
 ### VPS Sizing — Hetzner CPX41 (8 vCPU, 16 GB RAM)
@@ -140,6 +140,8 @@ Validated load targets: **10k DAU**, peak concurrent ~1,200–1,500 (9–11 AM I
 | `pricing` | 15 | Rate reads (mostly Redis), WS state |
 | `intelligence` | 15 | tsvector full-text search + catalog JSONB queries |
 | **Total** | **55** | Within PG default `max_connections = 100` |
+
+> **Note on 55 vs 60–80 estimate:** The load estimate (60–80) is a worst-case burst ceiling assuming every pool slot is simultaneously active. Actual steady-state sits at ~55 active connections, which matches the configured `MaxConns` total. Connection reuse via `pgx` keeps observed concurrency well below the ceiling. The per-service values are not under-provisioned — they reflect empirical steady-state, not peak arithmetic. If sustained burst stress tests show saturation, increase `pricing` and `intelligence` by 5 slots each before touching `max_connections`.
 
 Required `postgresql.conf`:
 
@@ -289,7 +291,9 @@ T+5ms     Application.onCreate():
             NOTE: TokenStore is NOT accessed here
 T+5ms     SplashScreen routing from token_exists_marker plain file (zero Keystore access)
 T+10ms    MainActivity.setContent{} → HomeScreen()
-T+10ms    RatesViewModel.init() → ratesRepository.getCachedRates()  [Room, ~5–15ms]
+T+10ms    HomeViewModel.init() → homeRepository.getCachedHome()  [Room, ~5–15ms]
+          — HomeViewModel owns the shimmer guard and first-render lifecycle;
+            RatesViewModel feeds the rates tile and is initialised subsequently
 T+80ms    ← FIRST MEANINGFUL RENDER from Room cache ✅
 T+80ms    Background coroutines: feature flags, BFF refresh, JWT pre-warm
 T+800ms   WsClient.connect() (token guaranteed valid ≥ 12 minutes)
@@ -433,7 +437,7 @@ PostgreSQL `LISTEN/NOTIFY` is the async event bus.
 | `flag_updated` | `core` | `gateway` | Redis cache invalidation |
 | `ai_rate_snapshot_ready` | `pricing` | `pricing` WS | Pushes to the rates channel |
 
-> ¹ `account_deleted` fires from two sources: `delete_account_usecase.go` (user-initiated) and `hard_delete_job.go` (system-initiated after the 30-day grace period). The intelligence listener is naturally idempotent — deleting already-absent rows is a no-op. Both fire paths must be covered in `delete_account_usecase_test.go`.
+> ¹ `account_deleted` fires from two sources: `delete_account_usecase.go` (user-initiated) and `hard_delete_job.go` (system-initiated after the 30-day grace period). The intelligence listener is naturally idempotent — deleting already-absent rows is a no-op. All three test cases must be covered in `delete_account_usecase_test.go`: Test A (user-initiated fire), Test B (system-initiated hard-delete), and Test C (double-fire idempotency). See `SECURITY.md — Compliance Requirements` for the full test specification.
 
 **NOTIFY reconnect invariant:** Every `pgnotify.NewListener` call must accept an `onReconnect` callback that re-runs the startup catch-up query on every reconnection, not only at startup. PostgreSQL NOTIFY is fire-and-forget — any event emitted during a reconnect window is permanently lost.
 

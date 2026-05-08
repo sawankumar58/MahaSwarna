@@ -161,15 +161,17 @@ The pricing service automatically serves the last known snapshot with `stale: tr
 
 ### Step 3 — Activate Kill Switch (if > 1 IST Market Session Affected)
 
-```bash
-# Raise FREE-tier BFF rate limit BEFORE activating kill switch to absorb polling load
-docker exec -it mahaswarna_postgres psql -U $POSTGRES_USER -c \
-  "UPDATE feature_flags SET value = 60 WHERE key = 'rate_limit_bff_free_rpm';"
+> **Use the canonical script — do not run the SQL manually.** The script raises the FREE-tier BFF rate limit *before* flipping the flag, then waits 5 seconds for the Redis flag cache to expire, then activates the kill-switch. Skipping the rate-limit pre-raise causes a 40 RPS polling spike against `GET /bff/home` at peak DAU, producing a simultaneous HTTP 429 storm for all users. See PRD OQ-8 for full rationale.
 
-# Activate WS kill-switch — clients fall back to REST polling
-docker exec -it mahaswarna_postgres psql -U $POSTGRES_USER -c \
-  "UPDATE feature_flags SET value = true WHERE key = 'kill_switch_ws';"
+```bash
+# Canonical kill-switch activation — handles all three steps atomically:
+#   STEP 1: raise rate_limit_bff_free_rpm to 60
+#   STEP 2: sleep 5s for Redis flag cache to refresh
+#   STEP 3: flip kill_switch_ws
+bash scripts/activate_ws_killswitch.sh
 ```
+
+> **Manual pre-check required before running the script at full DAU:** confirm that the deployed APK version on Play Console includes the `±5s jitter` polling implementation (`HomeScreen.kt`). If the APK version cannot be confirmed, treat the polling load as unspread and exercise extra caution.
 
 ### Step 4 — Manual Rate Override (Emergency)
 
@@ -413,7 +415,8 @@ docker compose restart pricing
 #    stop_grace_period: 20s in docker-compose.prod.yml allows close frames to be sent
 
 # 5. Verify WS is accepting connections
-wscat -c wss://ws.mahaswarna.com -H "Authorization: Bearer $TEST_JWT"
+# NOTE: port :4002 is required — ws.mahaswarna.com is directly exposed per ADR-002 (no TLS proxy on 443)
+wscat -c wss://ws.mahaswarna.com:4002 -H "Authorization: Bearer $TEST_JWT"
 
 # 6. Warm the cache
 bash scripts/warmup_cache.sh
@@ -497,9 +500,11 @@ Key storage: both keys in `.env.production` (encrypted at rest).
 ```bash
 # 1. Generate a new key in Google Cloud Console
 # 2. Update GEMINI_API_KEY in .env.production
-# 3. Restart pricing service only (the only consumer)
-docker compose restart pricing
-# 4. Verify rates are still updating
+# 3. Restart both consumers of GEMINI_API_KEY:
+#      pricing     — Gemini AI rate generation (ai_rate_scheduler_job.go)
+#      intelligence — Gemini Vision content moderation (moderation_client.go, banner upload)
+docker compose restart pricing intelligence
+# 4. Verify rates are still updating and banner moderation is healthy
 bash scripts/smoke_test.sh
 ```
 
@@ -577,6 +582,8 @@ Monitor these metrics in Grafana and act when thresholds are crossed:
 | DAU | > 50,000 | Begin K8s migration — extract `pricing` + WebSocket first |
 | BFF p95 latency | > 500ms consistently | Profile `home_aggregator.go` for upstream bottlenecks |
 | Gateway 5xx rate | > 0.5% for 2 min | SEV-1 — immediate investigation |
+
+> **SLO vs alert threshold:** The SLO target is < 0.1% 5xx error rate; the alert fires at > 0.5%. The gap is intentional — the 0.5% threshold filters transient spikes (e.g., a momentary upstream hiccup) while the SLO tracks sustained quality. If the error rate rises above 0.1% but stays below 0.5%, it appears in Grafana SLO dashboards as an SLO burn event requiring investigation within the next business hour (treat as SEV-3). Consider adding a SEV-2 alert at 0.2% sustained for 5 minutes if SLO burn becomes a recurring issue.
 
 ### Current HA Configuration (Option A — Launch)
 

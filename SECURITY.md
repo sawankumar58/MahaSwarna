@@ -33,7 +33,7 @@
 | Service-to-service impersonation | HMAC-SHA256 `X-Service-Token` on every internal call; all services on the same Docker bridge network |
 | Secret leak | `.env.production` encrypted at rest; Sentry/Grafana log redaction; rotated via `rotate_secrets.sh` |
 | WS DoS via upgrade storm | WS handshake rate limit (20 new upgrades/IP/min via Redis) enforced in `ws_server.go` |
-| Invoice rate fraud | Rate source resolution (live → stale → client_override → manual_override) with client-visible warnings |
+| Invoice rate fraud | Rate source resolution priority: **client_override → manual_override → stale → live** (client_override is highest; live is the default fallback). Any source other than `"live"` surfaces a client-visible warning. See `ARCHITECTURE.md — Intelligence` for the full priority table. |
 | API replay attacks | Idempotency layer caches POST responses by `Idempotency-Key` (Redis 24h TTL) |
 | OTP brute-force | Max 5 OTP sends/phone/hour; max 10 failed login attempts/phone/15 min |
 
@@ -401,11 +401,11 @@ CI fails if this file is absent (`test -f test/core/delete_account_usecase_test.
 
 ### Severity Levels
 
-| Severity | Definition | Response SLA |
-|---|---|---|
-| 🔴 **SEV-1** | Complete outage, data loss, or security breach | Immediate page 24/7; Eng Lead notified in 5 min; postmortem within 48h |
-| 🟡 **SEV-2** | Significant degradation affecting > 10% of users or revenue | Page; update `#prod-alerts`; status page updated every 30 min |
-| 🟢 **SEV-3** | Minor degradation with no immediate user impact | Slack `#prod-warnings`; investigate within 4h |
+| Severity | Definition | Response SLA | Resolution Target |
+|---|---|---|---|
+| 🔴 **SEV-1** | Complete outage, data loss, or security breach | Immediate page 24/7; Eng Lead notified in 5 min; postmortem within 48h | 30 minutes (aspirational — see RTO caveat in `RUNBOOK.md`) |
+| 🟡 **SEV-2** | Significant degradation affecting > 10% of users or revenue | Page; update `#prod-alerts`; status page updated every 30 min | 2 hours |
+| 🟢 **SEV-3** | Minor degradation with no immediate user impact | Slack `#prod-warnings`; investigate within 4h | 24 hours |
 
 ### Security Breach Response
 
