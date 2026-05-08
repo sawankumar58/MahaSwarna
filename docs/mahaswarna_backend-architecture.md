@@ -247,6 +247,12 @@ Note: Redis Sentinel is required regardless of which application HA option is ch
   before issuing any JWT. On integrity failure: return `HTTP 403 { "error": "device_not_trusted" }`.
   Client shows a "This device is not supported" blocking screen. The pre-purchase check is retained
   as a second enforcement layer.
+- **Play Integrity token expiry on login:** If the integrity token has expired before `POST /auth/login`
+  is called (e.g. user took >10 minutes to enter the OTP), Google returns a token-expiry error during
+  server-side verification. Return `HTTP 403 { "error": "integrity_token_expired" }`. The client
+  surfaces "Session expired — please try again" and resets the login flow to PhoneEntry, forcing the
+  user to re-initiate `sendOtp()` and obtain a fresh integrity token. This is distinct from
+  `device_not_trusted` — it is a recoverable flow error, not a permanent device block.
 - No endpoint trusts client-provided purchase status — the DB subscription record is the only source of truth.
 - All environment variables are validated at startup — missing secrets cause a hard crash (`os.Exit(1)`).
 - Service-to-service calls use `X-Service-Token: <HMAC-SHA256 of request timestamp + INTERNAL_JWT_SECRET>` — never the user's JWT. All services run on the same Docker bridge network; a shared HMAC secret is the appropriate control at this scale.
@@ -509,7 +515,14 @@ src/contracts/
 │
 └── http/
     ├── rates_dto.go                     # GetRateRequest, GetRateResponse
-    │                                    #   Source string enum: gemini
+    │                                    #   Source string — GAP-04 fix: NOT a closed enum.
+    │                                    #   Current sole value: "gemini".
+    │                                    #   Future values (e.g. "mcx", "manual_override") extend
+    │                                    #   this set without a breaking change. Do NOT model this
+    │                                    #   as a Go iota enum or a validated allowlist — new source
+    │                                    #   strings must be passable to clients without a backend
+    │                                    #   release. The Android client reads Source as a plain
+    │                                    #   String and passes it through to rate_viewed analytics.
     │                                    #   GeneratedAt time.Time
     ├── auth_dto.go
     ├── billing_dto.go
@@ -519,7 +532,25 @@ src/contracts/
     ├── catalog_dto.go                   # SearchDesignRequest, RecommendRequest,
     │                                    #   DesignResponse, PaginatedDesignResponse
     ├── bff_dto.go                       # HomeResponse (aggregated)
+                                         #   HomeResponse struct must include:
+                                         #     Degraded bool `json:"_degraded,omitempty"`
+                                         #   Set to true by home_aggregator.go when any
+                                         #   upstream (pricing or core/alerts) times out and
+                                         #   stale cache is served instead. Omitted (false) on
+                                         #   full-success responses. Client (BffDto.kt) reads
+                                         #   this as a transient delivery signal to show
+                                         #   StaleRateBanner; it is NOT persisted to Room.
     ├── compliance_dto.go                # DeleteAccountRequest, ConsentLogRequest
+                                         #   ConsentLogRequest struct:
+                                         #     UserID      string `json:"user_id"`
+                                         #     ConsentType string `json:"consent_type"`
+                                         #     Version     string `json:"version"`
+                                         #   VALID ConsentType values (enforced by allowlist
+                                         #   in log_consent_usecase.go):
+                                         #     "privacy_policy" | "tos"
+                                         #   "ai_disclaimer" is NOT a valid ConsentType and
+                                         #   must never be sent or accepted. Unknown values
+                                         #   are rejected with HTTP 400 invalid_consent_type.
     └── invoice_dto.go                   # GenerateInvoiceRequest, InvoiceResponse
                                          #   GenerateInvoiceRequest:
                                          #     ShopID            string
@@ -687,6 +718,31 @@ scripts/
                                  #   MSG91_OTP_EXPIRY_MINUTES    # default 10 if absent; warn but don't exit
                                  #   iOS vars (APPLE_*) not included (Android-only).
                                  #   exits 1 on ANY missing or malformed var
+└── activate_ws_killswitch.sh    # REQUIRED before any WS kill-switch activation (OQ-8 gate).
+                                 # Enforces the mandatory two-step sequence that prevents a 429
+                                 # storm when clients fall back to REST polling mode.
+                                 # MUST be used instead of direct DB updates for kill_switch_ws.
+                                 # Script logic:
+                                 #   1. Assert current rate_limit_bff_free_rpm == '40' (default).
+                                 #      If already raised: warn and skip step 2 (idempotent).
+                                 #   2. Raise: UPDATE feature_flags SET value = '60'
+                                 #             WHERE key = 'rate_limit_bff_free_rpm';
+                                 #   3. Sleep 5 seconds (Redis flag cache TTL is 60s; 5s is
+                                 #      sufficient because gateway refreshes flags on pub/sub
+                                 #      notification fired by set_flag_usecase.go).
+                                 #   4. Flip: UPDATE feature_flags SET value = 'true'
+                                 #            WHERE key = 'kill_switch_ws';
+                                 #   5. Confirm: SELECT key, value FROM feature_flags
+                                 #               WHERE key IN ('kill_switch_ws', 'rate_limit_bff_free_rpm');
+                                 #      Print result — operator confirms both values before exiting.
+                                 # ALSO used as a reference by generate_ai_rates_usecase.go's
+                                 # 3-failure escalation path — that code path calls
+                                 # set_flag_usecase.go directly in the correct order:
+                                 #   1. SetFlag("rate_limit_bff_free_rpm", "60")
+                                 #   2. time.Sleep(5 * time.Second)
+                                 #   3. SetFlag("kill_switch_ws", "true")
+                                 # The script is the ops-runbook equivalent for manual activation.
+                                 # Both paths enforce the same ordering invariant.
 ```
 
 ---
@@ -705,6 +761,43 @@ migrations/
 │   ├── 007_create_device_tokens.sql
 │   ├── 008_create_feature_flags.sql
 │   │                                    # includes otp_provider flag (firebase|msg91|both)
+│   │                                    # SEED DATA — REQUIRED (insert after CREATE TABLE):
+│   │                                    # Feature flags must be seeded on first deploy so that
+│   │                                    # GET /config/feature-flags never returns an empty object.
+│   │                                    # An empty response causes the Android client to fall back
+│   │                                    # to DEFAULT_FLAGS — which is correct — BUT a missing
+│   │                                    # kill_switch map causes the client to treat all kill-switches
+│   │                                    # as false (disabled), enabling unimplemented features
+│   │                                    # (image search) and payment flows on a fresh backend.
+│   │                                    # Required seed (INSERT OR IGNORE / ON CONFLICT DO NOTHING):
+│   │                                    #
+│   │                                    # -- Feature enables (default ON):
+│   │                                    # INSERT INTO feature_flags (key, value) VALUES
+│   │                                    #   ('ai_enabled',       'true'),
+│   │                                    #   ('shop_enabled',     'true'),
+│   │                                    #   ('ws_enabled',       'true'),
+│   │                                    #   ('payments_enabled', 'true'),
+│   │                                    #   ('catalog_enabled',  'true')
+│   │                                    # ON CONFLICT (key) DO NOTHING;
+│   │                                    #
+│   │                                    # -- Kill-switches (default OFF except image_search):
+│   │                                    # INSERT INTO feature_flags (key, value) VALUES
+│   │                                    #   ('kill_switch_ai',           'false'),
+│   │                                    #   ('kill_switch_ws',           'false'),
+│   │                                    #   ('kill_switch_payments',     'false'),
+│   │                                    #   ('kill_switch_catalog',      'false'),
+│   │                                    #   ('kill_switch_image_search', 'true')   ← BLOCKED BY DEFAULT
+│   │                                    # ON CONFLICT (key) DO NOTHING;
+│   │                                    #
+│   │                                    # -- Params:
+│   │                                    # INSERT INTO feature_flags (key, value) VALUES
+│   │                                    #   ('rate_sanity_threshold_pct', '2.0'),
+│   │                                    #   ('otp_provider',              'both'),
+│   │                                    #   ('rate_limit_bff_free_rpm',   '40')
+│   │                                    # ON CONFLICT (key) DO NOTHING;
+│   │                                    #
+│   │                                    # ON CONFLICT DO NOTHING ensures re-running migrations
+│   │                                    # (e.g. staging reset) does not overwrite operator-changed values.
 │   ├── 009_create_flag_audit.sql
 │   └── 010_create_audit_log.sql             # actor TEXT, action TEXT, entity TEXT,
 │                                            #   entity_id TEXT, metadata JSONB, occurred_at TIMESTAMPTZ
@@ -721,7 +814,15 @@ migrations/
     ├── 001_create_design_catalog.sql    # tsvector index on title+description+tags
     ├── 002_create_shops.sql
     └── 003_create_invoices.sql          # invoice_id UUID PK, shop_id FK, user_id,
-                                         #   customer_name, customer_phone, items JSONB,
+                                         #   customer_name TEXT, customer_phone TEXT,
+                                         #   -- NOTE: there is NO customer_id FK and NO
+                                         #   -- /customers backend endpoint. Customers are a
+                                         #   -- LOCAL Room-only concept in the Android Diary.
+                                         #   -- The backend stores customer_name + customer_phone
+                                         #   -- as plain denormalised strings. client_id (UUID)
+                                         #   -- exists only in BillEntity/CustomerEntity in Room
+                                         #   -- and must never be sent to any backend API.
+                                         #   items JSONB,
                                          #   subtotal, total, payment_mode, notes,
                                          #   pdf_size_bytes INTEGER,  -- PDF not stored server-side;
                                          #                               size recorded for audit only
@@ -796,9 +897,17 @@ test/
 │   ├── get_rate_usecase_test.go
 │   ├── ai_rate_scheduler_test.go
 │   └── rate_quality_watchdog_test.go    # covers staleness detection AND sanity checks in one suite:
-│                                        #   within 5% → pass; >5% → reject + stale;
+│                                        #   GAP-03 fix: threshold updated from 5% to 2% to match
+│                                        #   generate_ai_rates_usecase.go and rate_quality_watchdog.go.
+│                                        #   within 2% → pass; >2% → reject + stale;         ← corrected
 │                                        #   no prev snapshot → pass (first run);
-│                                        #   threshold override via feature flag
+│                                        #   threshold override via feature flag — test MUST read
+│                                        #   the threshold from the flag, not hardcode it, so the
+│                                        #   test boundary changes automatically when the flag changes.
+│                                        #   Additional required cases: [1.9% delta → pass],
+│                                        #   [2.1% delta → reject], [4.9% delta → reject],
+│                                        #   [5.1% delta → reject] — the 2–5% band was previously
+│                                        #   untested and would silently pass anomalous rates in prod.
 │
 ├── intelligence/
 │   ├── search_design_usecase_test.go
@@ -808,7 +917,31 @@ test/
 │                                         #   GoldRateOverride used when > 0;
 │                                         #   503 returned when pricing unavailable and
 │                                         #     no override provided;
-│                                         #   RateSource field correct for all three paths
+│                                         #   GAP-04 fix: RateSource correct for all FOUR paths: ← corrected
+│                                         #     Path 1 — GoldRateOverride > 0
+│                                         #               → RateSource == "client_override"
+│                                         #     Path 2 — no override, snapshot.Source == "manual_override"
+│                                         #               → RateSource == "manual_override"   ← new
+│                                         #     Path 3 — no override, snapshot.Stale == true
+│                                         #               → RateSource == "stale"
+│                                         #     Path 4 — no override, fresh live snapshot
+│                                         #               → RateSource == "live"
+│                                         #   GAP-H3 fix: BANNER RESIZE ASSERTIONS REQUIRED:
+│                                         #     Test A — CDN banner dimensions:
+│                                         #       after confirm_banner_upload_usecase runs,
+│                                         #       assert stored image width <= 1200 AND height <= 400.
+│                                         #     Test B — in-PDF banner dimensions:
+│                                         #       parse the generated PDF bytes and extract the embedded
+│                                         #       image; assert width <= 600 AND height <= 160.
+│                                         #     Test C — in-PDF banner encoding:
+│                                         #       assert the embedded banner is JPEG, not PNG or WebP.
+│                                         #       Raw PNG/WebP from CDN must never be embedded directly.
+│                                         #     Test D — total PDF size:
+│                                         #       assert len(pdfBytes) < 500*1024 (500 KB budget).
+│                                         #   These tests must use a real banner fixture image (PNG or
+│                                         #   WebP, >500 KB) to validate that the resize + re-encode
+│                                         #   pipeline actually fires, not just that the paths are
+│                                         #   reachable.
 │
 └── gateway/
     ├── bff_aggregator_test.go            # home aggregation only; cache hit/miss
@@ -829,15 +962,68 @@ test/
 src/gateway/
 ├── main.go                              # chi bootstrap, initFlagCache(), BFF aggregators
 ├── router.go                            # Route table → per-service resilient reverse proxies
-│                                        # GET  /bff/home       → bff_aggregator.go (inline)
-│                                        # POST /verify-receipt → core :4001/billing/verify
-│                                        # GET  /config/feature-flags → core :4001/flags/public
-│                                        # GET  /catalog/search    → intelligence :4003
-│                                        # GET  /catalog/recommend → intelligence :4003
-│                                        # DELETE /user/account → core :4001/user/account
-│                                        # POST /user/consent   → core :4001/user/consent
+│                                        #
+│                                        # MIDDLEWARE APPLICATION ORDER (required — must match exactly):
+│                                        #   r.Use(VersionMiddleware)       // 1st — rejects deprecated/unknown versions
+│                                        #   r.Use(JwtPreValidatorMiddleware) // 2nd — validates RS256 token + JTI
+│                                        #   r.Use(AiQuotaMiddleware)       // 3rd — reads quota headers after auth
+│                                        #   r.Use(LogRedactionMiddleware)  // 4th — strips sensitive values from logs
+│                                        # HttpLoggingInterceptor equivalent: optional debug handler, last.
+│                                        # RATIONALE: AiQuotaMiddleware must run after JwtPreValidatorMiddleware
+│                                        # so it can read user-scoped quota data under a validated identity.
+│                                        # If AiQuota runs before JWT validation, unauthenticated requests
+│                                        # would reach quota logic — either erroring or applying a default
+│                                        # quota to anonymous traffic. VersionMiddleware must be first so
+│                                        # deprecated clients are blocked before any token processing.
+│                                        # Changing this order is a security regression.
+│                                        #
+│                                        # GET  /bff/home                    → bff_aggregator.go (inline)
+│                                        # --- Auth ---
+│                                        # POST /auth/send-otp                → core :4001/auth/send-otp
+│                                        # POST /auth/login                   → core :4001/auth/login
+│                                        # POST /auth/refresh                 → core :4001/auth/refresh
+│                                        # POST /auth/logout                  → core :4001/auth/logout
+│                                        # --- Billing ---
+│                                        # POST /billing/verify               → core :4001/billing/verify
+│                                        #   ⚠️  Previously documented as POST /verify-receipt — INCORRECT.
+│                                        #   The canonical public path is /billing/verify (matches BillingApi.kt).
+│                                        #   /verify-receipt is NOT a valid public route; do not add it.
+│                                        # POST /billing/restore              → core :4001/billing/restore
+│                                        # --- Compliance ---
+│                                        # DELETE /user/account               → core :4001/user/account
+│                                        # POST /user/consent                 → core :4001/user/consent
 │                                        #   (all mobile calls go through the gateway; consent
 │                                        #    must be routed here — not accessed on core directly)
+│                                        # --- Alerts & Engagement ---
+│                                        # POST   /alerts                     → core :4001/alerts
+│                                        # GET    /alerts                     → core :4001/alerts
+│                                        # DELETE /alerts/:id                 → core :4001/alerts/:id
+│                                        # POST   /engagement/device-token    → core :4001/engagement/device-token
+│                                        # --- Feature Flags ---
+│                                        # GET  /config/feature-flags         → core :4001/flags/public
+│                                        #   (public client path → rewrites to internal /flags/public;
+│                                        #    all client-facing docs must reference /config/feature-flags)
+│                                        # --- Catalog ---
+│                                        # GET  /catalog/search               → intelligence :4003
+│                                        # GET  /catalog/recommend            → intelligence :4003
+│                                        # GET  /catalog/designs/:id          → intelligence :4003  ← GAP-01 fix
+│                                        #   Required endpoint: increments view_count server-side
+│                                        #   (catalog_handler.go IncrViewCount). Client calls this
+│                                        #   on DesignDetailScreen entry — omitting the call means
+│                                        #   view counts are never incremented (list endpoints do not
+│                                        #   call IncrViewCount). See catalog_handler.go.
+│                                        # NOTE: POST /catalog/image-search is intentionally ABSENT  ← GAP-02 fix
+│                                        #   from this route table. The route stub has been removed.
+│                                        #   catalog_handler.go is the canonical source: "DO NOT
+│                                        #   IMPLEMENT YET — absent from router.go." Both files now
+│                                        #   agree. Add the route only when the full Gemini Vision
+│                                        #   pipeline ships alongside killSwitchImageSearch=false.
+│                                        # --- Marketplace / Shops ---
+│                                        # POST /shops                        → intelligence :4003
+│                                        # GET  /shops                        → intelligence :4003
+│                                        # POST /shops/:id/banner             → intelligence :4003
+│                                        # POST /shops/:id/banner/confirm     → intelligence :4003
+│                                        # POST /shops/:id/invoice/generate   → intelligence :4003
 │
 ├── bff/
 │   └── home_aggregator.go               # fan-out (errgroup): pricing + core(alerts) + intelligence(shops)
@@ -862,7 +1048,15 @@ src/gateway/
 │                                        #   (avoids polluting Redis with empty-alert keys for 80% of users)
 │                                        #
 │                                        # func buildHomeResponse(rates *RatesPayload, alerts *AlertsPayload) HomeResponse
-│                                        #   merges both payloads; alerts may be nil (user has no active alerts)
+│                                        #   merges both payloads; alerts may be nil (user has no active alerts).
+│                                        #   SCOPE — rates + alerts ONLY (GAP-M7):
+│                                        #     Shop data (shop banner, shop details) is NOT included in the
+│                                        #     BFF home response. Clients must fetch shop data via a separate
+│                                        #     GET /shops call when the ShopBanner feature is accessed.
+│                                        #     buildHomeResponse MUST NOT be extended to include shop data
+│                                        #     without a separate caching strategy — shop data is user-scoped
+│                                        #     and write-heavy; adding it here would degrade BFF latency
+│                                        #     and inflate Redis cache memory (each shop record is ~4 KB).
 │                                        #
 │                                        # func ServeHome(w, r) — main handler:
 │                                        #   1. extract cityID from X-Region header (set by jwt_pre_validator)
@@ -887,6 +1081,36 @@ src/gateway/
     ├── trace_context.go                 # stores { requestID, traceID } in context; propagates downstream
     │                                    #   used for slog log correlation (slog.With("requestID", ...))
     │                                    #   exports ExtractTrace(r) + InjectTrace(headers, ctx)
+    ├── version_validator.go             # GAP-05 fix: validates Accept-Version request header.
+    │                                    # MUST be registered FIRST in the middleware chain — before
+    │                                    # jwt_pre_validator, so a deprecated client is blocked
+    │                                    # before any token processing occurs.
+    │                                    # KNOWN VERSIONS (update when /v2/ ships):
+    │                                    #   supported:  {"v1"}
+    │                                    #   deprecated: {} (empty until 90-day /v1/ window closes)
+    │                                    #
+    │                                    # Logic:
+    │                                    #   version := r.Header.Get("Accept-Version")
+    │                                    #   if version == "" { version = "v1" }  // missing header = v1
+    │                                    #   if _, ok := supported[version]; ok { next(w, r); return }
+    │                                    #   if _, ok := deprecated[version]; ok {
+    │                                    #     w.WriteHeader(http.StatusGone)          // 410
+    │                                    #     json.NewEncoder(w).Encode(map[string]string{
+    │                                    #       "error": "api_version_deprecated",
+    │                                    #     })
+    │                                    #     return
+    │                                    #   }
+    │                                    #   // unrecognised value (e.g. client bug sending "v3")
+    │                                    #   w.WriteHeader(http.StatusBadRequest)      // 400
+    │                                    #   json.NewEncoder(w).Encode(map[string]string{
+    │                                    #     "error": "unsupported_api_version",
+    │                                    #   })
+    │                                    #
+    │                                    # Client (Android) ApiErrorMapper:
+    │                                    #   HTTP 410 (any body)              → ApiError.VersionDeprecated
+    │                                    #   HTTP 400 + error=="unsupported_api_version" → ApiError.VersionDeprecated
+    │                                    #   Both → non-dismissible UpdateRequiredScreen (deep-link Play Store)
+    │                                    # This is the server-side implementation required by PRD §11.
     ├── global_rate_limiter.go           # Redis token bucket; FREE/PREMIUM/ADMIN tiers
     │                                    # 429 includes Retry-After + upgrade hint for FREE tier
     ├── jwt_pre_validator.go             # verify RS256 signature + JTI revocation check
@@ -965,6 +1189,35 @@ src/services/core/
 │   │                                    #   successful OTP verification; idempotent on re-register
 │   │                                    #   request body includes cityID (stored as users.city_id;
 │   │                                    #   embedded as `region` claim in every issued JWT)
+│   │                                    #   GAP-05 fix — ENDPOINT STATUS AND SEMANTICS:
+│   │                                    #   POST /auth/register is a LIVE ENDPOINT retained for
+│   │                                    #   future non-Android clients (web dashboard, iOS if added).
+│   │                                    #   It is NOT deprecated and NOT dead code.
+│   │                                    #   The Android v1 client NEVER calls /auth/register —
+│   │                                    #   it always uses /auth/login (upsert path handles new
+│   │                                    #   users). This is documented in PRD §5.
+│   │                                    #   KEY DIFFERENCE vs /auth/login cityID handling:
+│   │                                    #   /auth/register: ALWAYS writes cityID to users.city_id
+│   │                                    #     (the entire purpose of the register call is to set up
+│   │                                    #     the user row; cityID is mandatory and always applied).
+│   │                                    #   /auth/login:   writes cityID ONLY on fresh insert
+│   │                                    #     (xmax == 0 guard; see login_usecase.go); never
+│   │                                    #     overwrites an existing users.city_id.
+│   │                                    #   Future clients that call /auth/register must supply
+│   │                                    #   cityID; omitting it is a 400 validation error.
+│   │                                    #   DEFERRED FCM TOKEN REGISTRATION (G-16):
+│   │                                    #   After POST /auth/login issues a JWT and returns the
+│   │                                    #   response, the Android client may immediately fire a
+│   │                                    #   second request: POST /engagement/device-token with a
+│   │                                    #   previously deferred FCM token (one that arrived before
+│   │                                    #   the user had logged in). This is a separate request —
+│   │                                    #   auth_handler.go does NOT need to handle it; the JWT
+│   │                                    #   issued by the login response is sufficient auth for
+│   │                                    #   the subsequent device-token call. If POST
+│   │                                    #   /engagement/device-token ever adds stricter token-
+│   │                                    #   freshness validation, ensure the deferred path still
+│   │                                    #   works: the token is registered moments after login,
+│   │                                    #   so the JWT will always be fresh at that point.
 │   │                                    #   POST /auth/send-otp — triggers OTP delivery
 │   │                                    #   request body: { phone: string }
 │   │                                    #   Firebase path: no-op (client triggers SMS directly);
@@ -984,6 +1237,21 @@ src/services/core/
 │   │                                    #     Provider inferred from field presence if provider absent:
 │   │                                    #       firebaseIdToken present → firebase path
 │   │                                    #       otp present            → msg91 path
+│   │                                    #   SERVER-SIDE SILENT FIREBASE→MSG91 FALLBACK:
+│   │                                    #     If firebaseIdToken is present AND the Firebase Admin SDK
+│   │                                    #     experiences an infrastructure error (timeout, SDK internal
+│   │                                    #     error — NOT a credential verification failure), the server
+│   │                                    #     re-attempts via Msg91OtpProvider ONLY if otp is ALSO present
+│   │                                    #     in the same request. If otp is absent → return 401 immediately.
+│   │                                    #     NOTE: The Android v1 client never sends both firebaseIdToken
+│   │                                    #     and otp in the same request body; this path is a server-internal
+│   │                                    #     defensive mechanism only — it is NOT triggered by any current
+│   │                                    #     client code path. Do not rely on this as a primary auth flow.
+│   │                                    #   PLAY INTEGRITY TOKEN EXPIRY:
+│   │                                    #     If the integrityToken is expired (user took >~10 min to enter OTP),
+│   │                                    #     Google returns an expiry error during verification.
+│   │                                    #     Return: HTTP 403 { "error": "integrity_token_expired" }
+│   │                                    #     Client shows a retry error and restarts the login flow.
 │   │                                    #   VERIFICATION SEQUENCE:
 │   │                                    #     1. Play Integrity token verified (required — see invariants)
 │   │                                    #     2. OtpProvider.VerifyOTP(phone, token/otp) via dispatcher
@@ -997,7 +1265,11 @@ src/services/core/
 │   │                                    # (Android-only; no App Store endpoints)
 │   ├── alerts_handler.go                # POST /alerts, GET /alerts, DELETE /alerts/:id
 │   ├── device_token_handler.go          # POST /engagement/device-token (upsert per userID+deviceID)
-│   ├── flags_handler.go                 # GET /flags/public (JWT-auth, Redis-cached 60s)
+│   ├── flags_handler.go                 # GET /flags/public (INTERNAL to core — NOT client-callable)
+│   │                                    #   Public gateway path: GET /config/feature-flags
+│   │                                    #   (gateway router.go rewrites /config/feature-flags → core:4001/flags/public)
+│   │                                    #   All client references must use /config/feature-flags only.
+│   │                                    #   JWT-auth, Redis-cached 60s
 │   │                                    #   returns: { Flags map[string]bool, KillSwitch map[string]bool,
 │   │                                    #     Params map[string]float64 }
 │   │                                    #   flags: ai_enabled, shop_enabled, ws_enabled,
@@ -1045,6 +1317,28 @@ src/services/core/
 │   │                                    # checkLoginThrottle: max 10 failed login attempts per
 │   │                                    #   phone per 15 minutes (Redis counter login_fail:{phone}).
 │   │                                    # On OTP verified: reset login_fail counter.
+│   │                                    # cityID HANDLING ON LOGIN — GAP-03 fix:
+│   │                                    #   cityID is accepted in the request body for client
+│   │                                    #   compatibility but MUST NOT update users.city_id for
+│   │                                    #   existing (returning) users. The city set at registration
+│   │                                    #   is authoritative; overwriting it on every login would
+│   │                                    #   silently change the user's rate region.
+│   │                                    #   GUARD IMPLEMENTATION (required):
+│   │                                    #   Use INSERT ... ON CONFLICT (phone) DO NOTHING
+│   │                                    #   RETURNING xmax to detect a fresh insert:
+│   │                                    #     INSERT INTO users (phone, city_id, ...)
+│   │                                    #     VALUES ($phone, $cityID, ...)
+│   │                                    #     ON CONFLICT (phone) DO NOTHING
+│   │                                    #     RETURNING xmax
+│   │                                    #   xmax == 0  → row was freshly inserted (new user):
+│   │                                    #     city_id is already set from the INSERT above. ✓
+│   │                                    #   xmax != 0  → conflict occurred (returning user):
+│   │                                    #     DO NOT apply cityID. ✓
+│   │                                    #   DO NOT use a city_id IS NULL guard — a migration
+│   │                                    #   gap or data-corruption event could leave city_id = NULL
+│   │                                    #   for a returning user, causing their region to be silently
+│   │                                    #   overwritten on next login. The xmax signal is the only
+│   │                                    #   reliable indicator of a fresh insert.
 │   ├── refresh_usecase.go               # rotate refresh token, revoke old JTI
 │   ├── logout_usecase.go                # add JTI to Redis revocation set
 │   ├── delete_account_usecase.go        # 1. extract userID from JWT sub claim
@@ -1056,13 +1350,60 @@ src/services/core/
 │   │                                    # 5. schedule hard-delete (30-day grace)
 │   │                                    # 6. write audit entry → 204
 │   ├── log_consent_usecase.go           # idempotent by userID+type+version
+│   │                                    # VALID consentType VALUES — ALLOWLIST ENFORCED:
+│   │                                    #   "privacy_policy" | "tos"
+│   │                                    # Any other consentType (including "ai_disclaimer")
+│   │                                    # MUST be rejected with HTTP 400:
+│   │                                    #   { "error": "invalid_consent_type" }
+│   │                                    # Guard (run before DB insert):
+│   │                                    #   validTypes := map[string]bool{
+│   │                                    #     "privacy_policy": true, "tos": true,
+│   │                                    #   }
+│   │                                    #   if !validTypes[req.ConsentType] {
+│   │                                    #     return http.StatusBadRequest, ErrInvalidConsentType
+│   │                                    #   }
+│   │                                    # The AI Disclaimer is displayed client-side for
+│   │                                    # transparency but never logged as a consent event.
 │   ├── verify_receipt_usecase.go        # Google Play receipt → INSERT ON CONFLICT DO NOTHING
 │   │                                    # status transitions: pending → verified | failed
 │   │                                    # illegal transition guard: if row already verified,
 │   │                                    #   return existing record (idempotent).
 │   ├── restore_subscription_usecase.go  # Google Play purchase restore (Android only)
+│   │                                    # Queries Google Play Developer API for active
+│   │                                    # subscriptions linked to the user's Google account.
+│   │                                    # On active subscription found: update subscription
+│   │                                    #   record, issue new JWT with updated tier claim.
+│   │                                    # On NO active subscription found:
+│   │                                    #   → HTTP 404 { "error": "no_active_subscription" }
+│   │                                    #   Client surfaces: "No active subscription found
+│   │                                    #   for this account."
+│   │                                    # On any other error: HTTP 500 (client shows generic
+│   │                                    #   retry error; stays on Paywall screen).
+│   │                                    # KILL-SWITCH NOTE (GAP-M1): kill_switch_payments is
+│   │                                    #   NOT checked server-side in this usecase. The gate
+│   │                                    #   is client-side only (client hides the "Restore" UI
+│   │                                    #   when the flag is active). This is an accepted v1
+│   │                                    #   trade-off. If server-side gating is needed in future,
+│   │                                    #   add: flagRepo.Get("kill_switch_payments") == "true"
+│   │                                    #     → HTTP 503 { "error": "payments_unavailable" }
+│   │                                    #   before calling the Google Play Developer API.
 │   ├── evaluate_thresholds_usecase.go   # debounce 1hr per rule
 │   ├── deliver_alert_usecase.go         # FCM push (Android only) + pg NOTIFY alert_delivered channel
+│   │                                    # GAP-07 fix: FCM DATA PAYLOAD CONTRACT (canonical source):
+│   │                                    #   {
+│   │                                    #     "type":      "price_alert",
+│   │                                    #     "metal":     "gold" | "silver",
+│   │                                    #     "direction": "above" | "below",   ← required field
+│   │                                    #     "threshold": "<float as string>",
+│   │                                    #     "city_id":   "<cityID>",
+│   │                                    #     "screen":    "rates"
+│   │                                    #   }
+│   │                                    # All six fields are REQUIRED. PRD §9 previously omitted
+│   │                                    # "direction" from its example — that was a documentation
+│   │                                    # error. §8 AC and MahaSwarnMessagingService.kt both include
+│   │                                    # "direction"; this file is now the canonical server-side
+│   │                                    # definition. Android client reads all six fields from
+│   │                                    # remoteMessage.data[].
 │   ├── register_device_token_usecase.go # UPSERT ON CONFLICT (userID, deviceID) DO UPDATE
 │   └── set_flag_usecase.go              # SetFlag() → Redis write-through + pg NOTIFY flag_updated
 │
@@ -1153,6 +1494,26 @@ src/services/core/
 │   │                                    #   Redis key: otp_send:{E164phone}  INCR + EXPIRE 3600s
 │   │                                    #   On INCR result > 5: return HTTP 429 "too_many_otp_requests"
 │   │                                    #   before calling any provider. Applies to both providers.
+│   │                                    #
+│   │                                    # FIREBASE RATE-LIMIT BOUNDARY (required clarity):
+│   │                                    #   FirebaseTooManyRequestsException is a CLIENT-SIDE error
+│   │                                    #   surfaced by the Firebase Auth SDK on the Android device.
+│   │                                    #   When this fires, the client DOES NOT call POST /auth/login;
+│   │                                    #   the error is shown locally ("Too many attempts — try again later")
+│   │                                    #   and the MSG91 fallback is NOT triggered.
+│   │                                    #   The server-side MSG91 fallback in DualOtpProvider is triggered
+│   │                                    #   ONLY by Firebase Admin SDK infrastructure errors (timeout,
+│   │                                    #   SDK internal crash) — NOT by credential errors or rate-limit
+│   │                                    #   responses from the Firebase Admin SDK.
+│   │                                    #   IMPLEMENTATION GUARD (in firebase_otp_provider.go):
+│   │                                    #     Firebase Admin SDK VerifyIDToken returns specific error codes
+│   │                                    #     for credential failures (auth/id-token-expired,
+│   │                                    #     auth/id-token-invalid). These must return HTTP 401 immediately.
+│   │                                    #     Only network-level errors (context.DeadlineExceeded, io.EOF,
+│   │                                    #     connection refused) should propagate to DualOtpProvider as
+│   │                                    #     infrastructure errors triggering the MSG91 fallback.
+│   │                                    #   DO NOT add a "retry any Firebase error via MSG91" path —
+│   │                                    #   that would bypass Firebase's intentional rate-limit enforcement.
 │   │                                    #
 │   │                                    # AUDIT:
 │   │                                    #   Every OTP send + verify attempt (success or failure) is
@@ -1399,10 +1760,31 @@ src/services/pricing/
 │                                        #     → log to Sentry with error detail
 │                                        #   on 3 consecutive full-run failures (all cities fail):
 │                                        #     → escalate to SEV-1 via PagerDuty
-│                                        #     → activate kill_switch_ws feature flag via direct DB:
-│                                        #         UPDATE feature_flags SET value = true
-│                                        #         WHERE key = 'kill_switch_ws';
-│                                        #       client degrades to polling REST (30s interval)
+│                                        #     → activate kill_switch_ws feature flag via direct DB,
+│                                        #       BUT ONLY AFTER raising the BFF rate limit first.
+│                                        #       REQUIRED ORDER (OQ-8 gate — automated, not manual):
+│                                        #         STEP 1: raise rate limit BEFORE flipping kill-switch:
+│                                        #           UPDATE feature_flags SET value = '60'
+│                                        #           WHERE key = 'rate_limit_bff_free_rpm';
+│                                        #         STEP 2: wait 5 seconds for Redis flag cache to refresh.
+│                                        #         STEP 3: flip WS kill-switch:
+│                                        #           UPDATE feature_flags SET value = 'true'
+│                                        #           WHERE key = 'kill_switch_ws';
+│                                        #       This sequence MUST be encoded as a single runbook script
+│                                        #       (scripts/activate_ws_killswitch.sh) for manual ops use,
+│                                        #       and replicated in generate_ai_rates_usecase.go's
+│                                        #       3-failure escalation path using set_flag_usecase.go
+│                                        #       calls in the correct order with a 5s sleep between:
+│                                        #         flagUsecase.SetFlag(ctx, "rate_limit_bff_free_rpm", "60")
+│                                        #         time.Sleep(5 * time.Second)
+│                                        #         flagUsecase.SetFlag(ctx, "kill_switch_ws", "true")
+│                                        #       sends ~40 RPS of unspread polling against a gateway still
+│                                        #       enforcing the 40 RPM FREE-tier limit — 429 storm.
+│                                        #       The script asserts rate_limit_bff_free_rpm is updated
+│                                        #       before setting kill_switch_ws, then sleeps 5s.
+│                                        #       Also verify client ±5s jitter is deployed (check APK
+│                                        #       version on Play Console) before activating at full DAU.
+│                                        #       client degrades to polling REST (30s ±5s jitter interval)
 │                                        #       which serves stale:true banners — user is visibly informed
 │                                        #   MANUAL OVERRIDE PATH (admin UI or direct DB — documented here
 │                                        #   as the emergency procedure when Gemini is down for >1 IST session):
@@ -1530,6 +1912,21 @@ src/services/intelligence/
 │   ├── router.go
 │   ├── catalog_handler.go               # GET /catalog/search?q=&region=&page=&limit=
 │   │                                    # GET /catalog/recommend?region=&page=&limit=
+│   │                                    # GET /catalog/designs/:id  ← design detail endpoint
+│   │                                    #   VIEW COUNT INCREMENT — REQUIRED:
+│   │                                    #   When this endpoint is called (design detail view),
+│   │                                    #   the handler MUST call:
+│   │                                    #     viewCountCache.IncrViewCount(designID)
+│   │                                    #   The Android client does NOT make a separate increment
+│   │                                    #   request (PRD §4.3 AC). Server-side increment on the
+│   │                                    #   detail fetch is the only increment point.
+│   │                                    #   IncrViewCount uses an atomic Lua INCR+EXPIRE in
+│   │                                    #   view_count_cache.go (see that file for implementation).
+│   │                                    #   flush_view_counts_job.go flushes to DB every 5 min.
+│   │                                    #   NOTE: GET /catalog/search and GET /catalog/recommend
+│   │                                    #   do NOT call IncrViewCount — only the detail fetch does.
+│   │                                    #   Calling it on list endpoints would increment every design
+│   │                                    #   that appears in any result set, inflating counts.
 │   │                                    #
 │   │                                    # ⚠️  POST /catalog/image-search — DO NOT IMPLEMENT YET.
 │   │                                    #   This route is intentionally absent from router.go.
@@ -1572,6 +1969,23 @@ src/services/intelligence/
 │   │                                    #   PDF is NOT stored server-side; raw bytes returned
 │   │                                    #   directly. No CDN URL, no S3 key.
 │   │                                    #   rate limit: 60 invoices/shop/day (Redis counter)
+│   │                                    #   Redis key: invoice_count:{shopID}:{YYYY-MM-DD-IST}
+│   │                                    #     where YYYY-MM-DD-IST is today's date in Asia/Kolkata.
+│   │                                    #     Key is per-shop (NOT per-user): multiple authenticated
+│   │                                    #     owners of the same shop share the same counter.
+│   │                                    #     shopID is taken from the URL path param — NEVER from
+│   │                                    #     the JWT sub claim (which is the userID).
+│   │                                    #   TTL: set to seconds-until-midnight-IST on key creation.
+│   │                                    #     Compute: time.Until(nextMidnightIST(time.Now()))
+│   │                                    #     Key expires naturally at the IST day boundary.
+│   │                                    #   On limit exceeded: HTTP 429 with body:
+│   │                                    #     { "error": "invoice_daily_limit_exceeded" }
+│   │                                    #   Client ApiErrorMapper discriminates this body
+│   │                                    #   from a generic 429 (RateLimited) and maps to
+│   │                                    #   ApiError.InvoiceLimitExceeded with message:
+│   │                                    #   "Invoice limit reached for today — try again tomorrow."
+│   │                                    #   Integration test REQUIRED: seed two users on the same
+│   │                                    #   shop; assert their combined daily total is capped at 60.
 │   └── middleware/
 │       ├── service_auth.go              # validates X-Service-Token HMAC-SHA256 header
 │       ├── jwt_auth.go
@@ -1605,6 +2019,16 @@ src/services/intelligence/
 │   ├── register_shop_usecase.go         # gated by subscription tier
 │   ├── get_banner_upload_url_usecase.go # validates shop ownership; presigned S3 URL
 │   ├── confirm_banner_upload_usecase.go # Gemini Vision moderation → image resize → store
+│   │                                    # STEP 1 OF TWO-STEP RESIZE PIPELINE:
+│   │                                    #   After moderation passes, resize the uploaded
+│   │                                    #   banner to a maximum of 1200×400 px before
+│   │                                    #   writing to CDN storage. This enforces the
+│   │                                    #   PDF invoice size budget and is step (a).
+│   │                                    # STEP 2 is in invoice_pdf_builder.go (max 600×160
+│   │                                    #   px, JPEG quality 80, before PDF embedding).
+│   │                                    # Integration tests validating banner dimensions must
+│   │                                    #   account for both steps: CDN-stored image ≤1200×400;
+│   │                                    #   in-PDF image ≤600×160.
 │   └── generate_invoice_usecase.go      # 1. validate shop ownership (shopID must belong to JWT sub)
 │                                        # 2. fetch shop record → name, address, GST, phone, bannerCDNURL
 │                                        # 3. resolve gold/silver rate for shop's city:
@@ -1634,7 +2058,15 @@ src/services/intelligence/
 │                                        # 7. insert invoice record (invoice_repository) with
 │                                        #      pdf_size_bytes (no S3 key — PDF is not stored server-side)
 │                                        # 8. return InvoiceResponse { invoiceID, pdfBytes []byte,
-│                                        #       generatedAt, rateSource ("live"|"stale"|"client_override") }
+│                                        #       generatedAt, rateSource }
+│                                        #    GAP-04 fix: rateSource is one of FOUR values:
+│                                        #      "client_override" — GoldRateOverride > 0 (step 3a)
+│                                        #      "manual_override" — admin-inserted snapshot (step 3b)
+│                                        #      "stale"           — snapshot.Stale == true (step 3b)
+│                                        #      "live"            — fresh Gemini snapshot (step 3b)
+│                                        #    Previously documented as three values — "manual_override"
+│                                        #    was omitted. All four values are handled in step 3 and
+│                                        #    must be covered by generate_invoice_usecase_test.go.
 │                                        #    PDF bytes are streamed directly to the client.
 │                                        #    Client is responsible for persisting to local device storage.
 │
@@ -1650,7 +2082,23 @@ src/services/intelligence/
 │   ├── invoice_pdf_builder.go           # uses signintech/gopdf (pure Go, no CGO)
 │   │                                    # layout per page:
 │   │                                    #   HEADER: shop banner image (fetched from S3/CDN URL,
-│   │                                    #     cached in-process 1h) — full width, max-height 80pt
+│   │                                    #     cached in-process 1h)
+│   │                                    #   INR FORMATTING (GAP-4 fix):
+│   │                                    #     All monetary values in the PDF (line item totals,
+│   │                                    #     grand total, per-gram rate) must use Indian
+│   │                                    #     lakh/crore grouping: e.g. ₹61,23,456.00.
+│   │                                    #     Use golang.org/x/text/message with language.Hindi
+│   │                                    #     or format manually: groups of 2 after the first 3
+│   │                                    #     digits from the right.
+│   │                                    #     Do NOT use strconv.FormatFloat with plain US grouping.
+│   │                                    #   STEP 2 OF TWO-STEP RESIZE PIPELINE (GAP-1 fix):
+│   │                                    #     Resize to MAX 600×160 px (aspect-ratio preserving).
+│   │                                    #     Re-encode as JPEG at quality 80.
+│   │                                    #     Do NOT embed raw PNG or WebP from CDN directly —
+│   │                                    #     uncompressed banners can exceed the 500 KB PDF budget.
+│   │                                    #     Step 1 (1200×400 px CDN resize) is in
+│   │                                    #     confirm_banner_upload_usecase.go; both steps are
+│   │                                    #     required for the PDF size NFR (< 500 KB).
 │   │                                    #   BANNER FETCH FAILURE FALLBACK:
 │   │                                    #     If CDN fetch fails or times out (2s deadline):
 │   │                                    #       - Log error to Sentry (non-fatal)
@@ -1731,6 +2179,32 @@ src/services/intelligence/
                                          #   handler. Test coverage: delete_account_usecase_test.go
                                          #   must assert that shops + invoices rows are absent after
                                          #   the cascade (integration test via testcontainers-go).
+                                         # DROPPED NOTIFY COMPENSATING MECHANISM (G-20):
+                                         #   pg NOTIFY is fire-and-forget. If the intelligence service
+                                         #   is restarting during a user's account deletion, the
+                                         #   account_deleted NOTIFY fires and is silently lost —
+                                         #   that user's shops and invoices will never be purged
+                                         #   (GDPR/compliance violation).
+                                         #   REQUIRED: at startup (and on every pg reconnect callback),
+                                         #   intelligence must run a catch-up purge query against
+                                         #   the core schema via the internal API:
+                                         #     Query core: GET /internal/pending-purges
+                                         #     (or: check core.users WHERE hard_deleted_at IS NOT NULL
+                                         #      AND user_id still present in intelligence.shops or invoices)
+                                         #   Simplest implementation (Option A — recommended):
+                                         #     At startup, run:
+                                         #       DELETE FROM shops WHERE user_id IN (
+                                         #         SELECT user_id FROM pending_intelligence_purges)
+                                         #       DELETE FROM invoices WHERE user_id IN (
+                                         #         SELECT user_id FROM pending_intelligence_purges)
+                                         #   where pending_intelligence_purges is a table in the
+                                         #   intelligence schema populated by account_deleted listener
+                                         #   BEFORE the DELETE — this makes the delete idempotent and
+                                         #   recoverable on restart.
+                                         #   Alternatively (Option B): hard_delete_job.go in core
+                                         #   queries intelligence DB directly as a fallback cleanup step
+                                         #   after emitting the NOTIFY (cross-schema only for cleanup).
+                                         #   Option A is preferred — keeps intelligence self-contained.
                                          # REQUIRED: RebuildSubscriptionProjectionViaAPI() called at
                                          #   startup before LISTEN goroutine. Calls:
                                          #     GET http://core:4001/internal/subscriptions/active
@@ -1838,6 +2312,12 @@ src/observability/
 │                                        #   p95 < 500ms | p99 < 2000ms  (rates)
 │                                        #   p99 < 200ms                  (WS fanout)
 │                                        #   error_rate < 0.1% (gateway 5xx / total)
+│                                        # ANDROID PERFORMANCE TARGET (aligned — GAP-L1):
+│                                        #   cold_start_first_frame Firebase Performance trace: < 80ms
+│                                        #   This is the authoritative ceiling; the "50–80ms" range
+│                                        #   mentioned in the frontend architecture's timing diagram
+│                                        #   is a typical observed window, not a separate specification.
+│                                        #   The hard target for QA pass/fail is < 80ms.
 │
 ├── health.go                            # GET /health       → 200 as soon as HTTP server binds
 │                                        #                      (DO NOT use for depends_on conditions)
@@ -1996,11 +2476,16 @@ Mitigation steps are time-critical:
 
 1. Check container: `docker ps | grep redis`
 2. Verify DB fallback: `/api/rates/city-mumbai` should return `200`, not `503`.
-3. **🔴 IMMEDIATELY activate `killSwitchWs` and `killSwitchPayments` feature flags** via direct DB update:
-   `UPDATE feature_flags SET value = true WHERE key IN ('kill_switch_ws', 'kill_switch_payments');`
+3. **🔴 IMMEDIATELY activate `killSwitchWs` and `killSwitchPayments` feature flags** via direct DB update — **in this exact order** (see `scripts/activate_ws_killswitch.sh`):
+   ```sql
+   -- STEP 1: raise BFF rate limit FIRST (prevents 429 storm when clients start polling)
+   UPDATE feature_flags SET value = '60' WHERE key = 'rate_limit_bff_free_rpm';
+   -- wait 5s for Redis flag cache to refresh, THEN:
+   -- STEP 2: flip kill-switches
+   UPDATE feature_flags SET value = 'true' WHERE key IN ('kill_switch_ws', 'kill_switch_payments');
+   ```
    This prevents WS connections and payment flows while revocation is unreachable.
-   **⚠️ Kill-switch load warning:** Activating `kill_switch_ws` causes all Android clients to fall back to 30-second REST polling against `GET /bff/home`. At 1,200 concurrent users this generates ~40 RPS — matching the normal BFF peak ceiling. If client builds include the jitter patch (`±5s` polling offset), the load is spread. Raise the FREE-tier BFF rate limit via direct DB update before flipping the switch at full DAU:
-   `UPDATE feature_flags SET value = 60 WHERE key = 'rate_limit_bff_free_rpm';`
+   **⚠️ Kill-switch load warning:** Activating `kill_switch_ws` causes all Android clients to fall back to 30-second REST polling against `GET /bff/home`. At 1,200 concurrent users this generates ~40 RPS — matching the normal BFF peak ceiling. **GAP-09 fix: Android clients implement mandatory ±5s jitter (enforced in `HomeScreen.kt` — `Random.nextLong(-5_000L, 5_000L)`) so the load is already spread. Verify the deployed APK version includes this implementation before activating at full DAU; if you are unsure of the client version in the field, treat the load as unspread and proceed with caution.** The rate limit raise in STEP 1 is the automated gate — do not skip it.
 4. Restart: `docker compose restart redis`
 5. If OOM: `redis-cli CONFIG SET maxmemory 2gb`
 6. After restore: `bash scripts/warmup_cache.sh`
@@ -2077,6 +2562,7 @@ When any single service needs >2 replicas sustainably, migrate that service firs
 `POST /user/consent` — **Idempotent:** same `userID + type + version` → returns existing record.
 Consent types: `privacy_policy | tos`
 Table is insert-only: `REVOKE UPDATE, DELETE ON consent_log FROM app_role`.
+**GAP-08 fix:** Any `consentType` value other than `"privacy_policy"` or `"tos"` (including `"ai_disclaimer"`) is rejected by `log_consent_usecase.go` with `HTTP 400 { "error": "invalid_consent_type" }` before the DB insert. See `log_consent_usecase.go` for the allowlist guard implementation.
 
 ### Data Retention Policy
 
