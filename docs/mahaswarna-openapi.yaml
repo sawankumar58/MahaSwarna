@@ -1,0 +1,2062 @@
+openapi: 3.0.3
+
+info:
+  title: MahaSwarna API
+  version: v1
+  description: |
+    Real-time gold and silver price intelligence platform for Indian jewellers.
+
+    ## Architecture
+    All client-facing routes are proxied through the API Gateway (`:4000`).
+    The gateway performs JWT pre-validation, rate limiting, and BFF aggregation
+    before forwarding to the appropriate upstream service:
+
+    | Service     | Internal Port | Responsibilities                                      |
+    |-------------|---------------|-------------------------------------------------------|
+    | gateway     | 4000          | Routing, JWT validation, rate limiting, BFF           |
+    | core        | 4001          | Auth, billing, alerts, feature flags                  |
+    | pricing     | 4002          | Gold/silver rates, WebSocket realtime                 |
+    | intelligence| 4003          | Catalog, shops, invoices                              |
+
+    ## WebSocket
+    The WebSocket endpoint is **not** proxied through the gateway.
+    Clients connect directly to `wss://ws.mahaswarna.com:4002`.
+    Auth is performed via JWT during the WS handshake.
+    See the WebSocket section at the bottom of this spec.
+
+    ## Versioning
+    All routes are versioned under `/v1/`.
+    Clients MUST send `Accept-Version: v1` on every request.
+    - Missing header → treated as `v1` (backward compatible).
+    - Unrecognised value (e.g. `v3`) → `HTTP 400 unsupported_api_version`.
+    - Deprecated version → `HTTP 410 api_version_deprecated`.
+
+    Both 400 and 410 must navigate the Android client to a non-dismissible
+    `UpdateRequiredScreen` that deep-links to the Play Store.
+
+    ## Security
+    JWT RS256. Access token TTL: 15 minutes. Refresh token TTL: 30 days.
+    Token payload: `sub` (userID), `jti`, `tier` (FREE|PREMIUM|ADMIN), `region` (cityID), `iat`, `exp`.
+
+    ## INR Formatting
+    All monetary values use Indian lakh/crore grouping (`en_IN` locale).
+    The Android client formats with `Locale("en", "IN")`.
+    The PDF builder formats with `golang.org/x/text/message` (language.Hindi).
+
+  contact:
+    name: MahaSwarna Engineering
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://api.mahaswarna.com/v1
+    description: Production
+  - url: https://staging-api.mahaswarna.com/v1
+    description: Staging
+  - url: http://10.0.2.2:4000/v1
+    description: Android Emulator (local dev — maps to host machine gateway)
+
+tags:
+  - name: auth
+    description: OTP-based phone authentication (Firebase primary / MSG91 fallback)
+  - name: compliance
+    description: Account deletion and consent logging
+  - name: billing
+    description: Google Play In-App Purchase verification and subscription restore (Android only)
+  - name: alerts
+    description: User-configured gold/silver price threshold alerts
+  - name: engagement
+    description: FCM device token registration
+  - name: config
+    description: Feature flags and kill-switches
+  - name: bff
+    description: Backend-For-Frontend aggregated home response
+  - name: rates
+    description: Gold and silver spot rates for 61 Indian cities
+  - name: catalog
+    description: Jewellery design catalog — search, recommendations, detail
+  - name: marketplace
+    description: Shop profiles and banner management
+  - name: invoices
+    description: GST-aware PDF invoice generation
+  - name: health
+    description: Liveness and readiness probes
+
+# ---------------------------------------------------------------------------
+# Security Schemes
+# ---------------------------------------------------------------------------
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        RS256-signed JWT issued by `POST /auth/login` or `POST /auth/refresh`.
+        Access token TTL: 15 minutes.
+        Refresh token TTL: 30 days (stored in DB, revocable via JTI).
+
+  # ---------------------------------------------------------------------------
+  # Reusable Parameters
+  # ---------------------------------------------------------------------------
+  parameters:
+    AcceptVersion:
+      name: Accept-Version
+      in: header
+      required: false
+      schema:
+        type: string
+        enum: [v1]
+        default: v1
+      description: API version. Absence is treated as `v1`.
+
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: |
+        Client-generated UUID. The gateway caches POST responses by this key for 24 hours.
+        Required on all payment-mutating endpoints to prevent duplicate billing on retry.
+
+    CityID:
+      name: cityID
+      in: path
+      required: true
+      schema:
+        type: string
+        example: mumbai
+      description: City slug from the compile-time 61-city constant in `ApiConstants.kt`.
+
+    AlertID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+    ShopID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  # ---------------------------------------------------------------------------
+  # Reusable Response Headers
+  # ---------------------------------------------------------------------------
+  headers:
+    XAiQuotaUsed:
+      description: Gemini API requests used in the current window.
+      schema:
+        type: integer
+    XAiQuotaLimit:
+      description: Maximum Gemini API requests allowed per window.
+      schema:
+        type: integer
+    XAiQuotaResetAt:
+      description: Unix epoch timestamp when the quota window resets.
+      schema:
+        type: integer
+        format: int64
+    RetryAfter:
+      description: Seconds to wait before retrying (present on 429 responses).
+      schema:
+        type: integer
+
+  # ---------------------------------------------------------------------------
+  # Reusable Error Responses
+  # ---------------------------------------------------------------------------
+  responses:
+    BadRequest:
+      description: Validation error or malformed request body.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+          examples:
+            validation:
+              value: { error: validation_error, message: "phone is required" }
+            unsupportedVersion:
+              value: { error: unsupported_api_version }
+            invalidConsentType:
+              value: { error: invalid_consent_type }
+
+    Unauthorized:
+      description: Missing, expired, or invalid JWT / OTP.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+          examples:
+            otpInvalid:
+              value: { error: otp_invalid }
+            tokenExpired:
+              value: { error: token_expired }
+
+    Forbidden:
+      description: Device integrity check failed or token expired.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+          examples:
+            deviceNotTrusted:
+              value: { error: device_not_trusted }
+            integrityTokenExpired:
+              value: { error: integrity_token_expired }
+              description: |
+                Recoverable. User took >~10 minutes to enter OTP.
+                Client resets the login flow to PhoneEntry.
+
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+          examples:
+            cityRatesNotAvailable:
+              value: { error: city_rates_not_available, message: "Rates not yet available for this city" }
+              description: Only occurs on cold-start before Gemini has run its first fetch.
+            noActiveSubscription:
+              value: { error: no_active_subscription }
+
+    Gone:
+      description: API version deprecated. Client must update the app.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+          examples:
+            deprecated:
+              value:
+                error: api_version_deprecated
+                upgrade_url: "https://play.google.com/store/apps/details?id=com.mahaswarna"
+
+    TooManyRequests:
+      description: Rate limit exceeded.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+          examples:
+            generic:
+              value: { error: too_many_requests }
+            invoiceLimit:
+              value: { error: invoice_daily_limit_exceeded }
+              description: >
+                Shop has generated 60 invoices today (IST day boundary).
+                Client shows: "Invoice limit reached for today — try again tomorrow."
+            otpResend:
+              value: { error: too_many_otp_requests }
+              description: >
+                More than 5 OTP sends for the same E.164 phone in 60 minutes.
+
+    ServiceUnavailable:
+      description: Upstream dependency unavailable (rate data, pricing service).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+          examples:
+            rateUnavailable:
+              value: { error: rate_unavailable }
+            paymentsUnavailable:
+              value: { error: payments_unavailable }
+
+  # ---------------------------------------------------------------------------
+  # Schemas
+  # ---------------------------------------------------------------------------
+  schemas:
+
+    # ── Utility ──────────────────────────────────────────────────────────────
+
+    ErrorBody:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Machine-readable error code.
+          example: validation_error
+        message:
+          type: string
+          description: Human-readable detail (optional).
+          example: "phone is required"
+        upgrade_url:
+          type: string
+          description: Play Store URL — only present on 410 responses.
+          example: "https://play.google.com/store/apps/details?id=com.mahaswarna"
+
+    # ── Auth ─────────────────────────────────────────────────────────────────
+
+    SendOtpRequest:
+      type: object
+      required: [phone]
+      properties:
+        phone:
+          type: string
+          description: >
+            Recipient phone number. Backend normalises to E.164 (+91XXXXXXXXXX) before
+            applying the 5-sends-per-hour Redis throttle. Raw formats accepted:
+            `+91XXXXXXXXXX`, `91XXXXXXXXXX`, `0XXXXXXXXXX`, `XXXXXXXXXX`.
+          example: "+919876543210"
+
+    SendOtpResponse:
+      type: object
+      required: [provider]
+      properties:
+        provider:
+          type: string
+          enum: [firebase, msg91]
+          description: >
+            Indicates which OTP flow the client should use.
+            `firebase` → client already has the OTP via Firebase SMS; submit `firebaseIdToken`.
+            `msg91` → OTP was delivered via MSG91 SMS; submit the 6-digit `otp` code.
+
+    LoginRequest:
+      type: object
+      required: [phone, integrityToken, provider]
+      properties:
+        phone:
+          type: string
+          example: "+919876543210"
+        provider:
+          type: string
+          enum: [firebase, msg91]
+          description: >
+            Drives the server-side verification path.
+            If absent, server infers from field presence:
+            `firebaseIdToken` present → firebase path;
+            `otp` present → msg91 path.
+        firebaseIdToken:
+          type: string
+          description: >
+            Required when `provider = firebase`.
+            Firebase ID token from `PhoneAuthCredential.token`.
+        otp:
+          type: string
+          description: >
+            Required when `provider = msg91`.
+            6-digit code received via MSG91 SMS.
+          minLength: 6
+          maxLength: 6
+        integrityToken:
+          type: string
+          description: >
+            Play Integrity API token. Required on every login.
+            On `HTTP 403 device_not_trusted`: show blocking screen, never navigate to Home.
+            On `HTTP 403 integrity_token_expired`: user took >~10 min; restart login flow.
+        cityID:
+          type: string
+          description: >
+            City slug from the 61-city constant. Written to `users.city_id` ONLY on a
+            fresh insert (new user). NEVER overwrites an existing city on returning user.
+            Guard: `INSERT … ON CONFLICT DO NOTHING RETURNING xmax`; skip city update when `xmax != 0`.
+          example: mumbai
+
+    RegisterRequest:
+      type: object
+      required: [phone, integrityToken, cityID]
+      properties:
+        phone:
+          type: string
+          example: "+919876543210"
+        firebaseIdToken:
+          type: string
+        otp:
+          type: string
+          minLength: 6
+          maxLength: 6
+        integrityToken:
+          type: string
+        cityID:
+          type: string
+          description: >
+            ALWAYS written to `users.city_id` (unlike `/auth/login` which guards against overwrites).
+            Mandatory — omitting it is a 400 validation error.
+          example: mumbai
+
+    AuthTokenResponse:
+      type: object
+      required: [accessToken, refreshToken, tier]
+      properties:
+        accessToken:
+          type: string
+          description: RS256-signed JWT. TTL 15 minutes.
+        refreshToken:
+          type: string
+          description: Opaque token. TTL 30 days. Stored in DB, revocable via JTI.
+        tier:
+          type: string
+          enum: [FREE, PREMIUM, ADMIN]
+          description: >
+            Subscription tier embedded in the JWT `tier` claim.
+            Client NEVER trusts locally-stored purchase state — always derived from this claim.
+
+    RefreshRequest:
+      type: object
+      required: [refreshToken]
+      properties:
+        refreshToken:
+          type: string
+
+    LogoutRequest:
+      type: object
+      required: [refreshToken]
+      properties:
+        refreshToken:
+          type: string
+          description: The JTI of this token is added to the Redis revocation set.
+
+    # ── Compliance ────────────────────────────────────────────────────────────
+
+    ConsentRequest:
+      type: object
+      required: [consentType, version]
+      properties:
+        consentType:
+          type: string
+          enum: [privacy_policy, tos]
+          description: >
+            ALLOWLIST ENFORCED — only `privacy_policy` and `tos` are valid.
+            `ai_disclaimer` is displayed client-side for transparency but NEVER sent to this endpoint.
+            Any other value returns HTTP 400 `invalid_consent_type`.
+        version:
+          type: string
+          description: >
+            Version string of the policy document accepted by the user.
+          example: "1.0"
+      description: >
+        On first consent, the client makes EXACTLY TWO sequential calls:
+        one with `consentType: "privacy_policy"` and one with `consentType: "tos"`.
+        Idempotent: same `userID + consentType + version` returns the existing record (safe on reinstall).
+        Table is insert-only — backend enforces `REVOKE UPDATE, DELETE ON consent_log`.
+
+    # ── Billing ───────────────────────────────────────────────────────────────
+
+    VerifyReceiptRequest:
+      type: object
+      required: [purchaseToken, productId, packageName]
+      properties:
+        purchaseToken:
+          type: string
+          description: Google Play purchase token from the Billing Library response.
+        productId:
+          type: string
+          description: IAP product ID (must be a known SKU from `known_skus.go`).
+        packageName:
+          type: string
+          example: com.mahaswarna
+      description: >
+        Verified server-side via the Google Play Developer API.
+        Idempotent: `INSERT ON CONFLICT DO NOTHING` — re-sending the same token is safe.
+        Requires `Idempotency-Key` header to guard against double-billing on retry.
+
+    BillingResponse:
+      type: object
+      required: [tier, expiresAt]
+      properties:
+        tier:
+          type: string
+          enum: [FREE, PREMIUM, ADMIN]
+        expiresAt:
+          type: string
+          format: date-time
+          description: ISO 8601 timestamp when the subscription expires.
+          example: "2025-12-31T23:59:59+05:30"
+
+    # ── Alerts ────────────────────────────────────────────────────────────────
+
+    CreateAlertRequest:
+      type: object
+      required: [cityId, metal, threshold, direction]
+      properties:
+        cityId:
+          type: string
+          example: mumbai
+        metal:
+          type: string
+          enum: [gold, silver]
+        threshold:
+          type: number
+          format: double
+          description: Price per gram in INR at which the alert triggers.
+          example: 6200.00
+        direction:
+          type: string
+          enum: [above, below]
+          description: >
+            `above` → alert fires when rate crosses threshold from below.
+            `below` → alert fires when rate crosses threshold from above.
+
+    AlertResponse:
+      type: object
+      required: [id, cityId, metal, threshold, direction, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        cityId:
+          type: string
+        metal:
+          type: string
+          enum: [gold, silver]
+        threshold:
+          type: number
+          format: double
+        direction:
+          type: string
+          enum: [above, below]
+        createdAt:
+          type: string
+          format: date-time
+
+    AlertListResponse:
+      type: object
+      required: [alerts]
+      properties:
+        alerts:
+          type: array
+          items:
+            $ref: '#/components/schemas/AlertResponse'
+
+    # ── Engagement ────────────────────────────────────────────────────────────
+
+    DeviceTokenRequest:
+      type: object
+      required: [token, deviceId, platform]
+      properties:
+        token:
+          type: string
+          description: FCM registration token from `FirebaseMessaging.getInstance().token`.
+        deviceId:
+          type: string
+          description: Stable device identifier (Android ID or generated UUID stored in EncryptedSharedPreferences).
+        platform:
+          type: string
+          enum: [android]
+          description: iOS is not supported in v1.
+      description: >
+        Upserted per `(userID, deviceID)` pair.
+        Deferred FCM token: if `onNewToken` fires before authentication, the token is stored in
+        `PreferenceStore.pending_fcm_token` and registered here immediately after the next login.
+
+    # ── Feature Flags ─────────────────────────────────────────────────────────
+
+    FeatureFlagsResponse:
+      type: object
+      required: [flags, killSwitch, params]
+      properties:
+        flags:
+          type: object
+          description: Feature enable/disable toggles.
+          required: [ai_enabled, shop_enabled, ws_enabled, payments_enabled, catalog_enabled]
+          properties:
+            ai_enabled:
+              type: boolean
+              default: true
+            shop_enabled:
+              type: boolean
+              default: true
+            ws_enabled:
+              type: boolean
+              default: true
+            payments_enabled:
+              type: boolean
+              default: true
+            catalog_enabled:
+              type: boolean
+              default: true
+        killSwitch:
+          type: object
+          description: >
+            Emergency circuit breakers. Default: all `false` except `image_search` which
+            MUST default to `true` (backend not yet implemented).
+            NEVER omit `killSwitch` in the response — a missing key causes the client to default
+            to `false`, enabling unimplemented features on first install.
+          required: [ai, ws, payments, catalog, image_search]
+          properties:
+            ai:
+              type: boolean
+              default: false
+            ws:
+              type: boolean
+              default: false
+            payments:
+              type: boolean
+              default: false
+            catalog:
+              type: boolean
+              default: false
+            image_search:
+              type: boolean
+              default: true
+              description: >
+                Defaults to TRUE (blocked). The `/catalog/image-search` backend endpoint
+                is not yet implemented. Client must not enable image search until this
+                kill-switch is explicitly set to `false` in a coordinated backend+frontend release.
+        params:
+          type: object
+          description: Numeric configuration parameters.
+          properties:
+            rate_sanity_threshold_pct:
+              type: number
+              format: double
+              default: 2.0
+              description: >
+                Maximum allowed rate-delta percentage between consecutive Gemini snapshots.
+                Read by `rate_quality_watchdog.go` without a deploy.
+                Hardcoded fallback in the watchdog is also 2.0 (they must match).
+            rate_limit_bff_free_rpm:
+              type: number
+              format: double
+              default: 40
+              description: >
+                FREE-tier RPM cap for `GET /bff/home`. Raised to 60 by
+                `scripts/activate_ws_killswitch.sh` BEFORE the WS kill-switch is toggled.
+                Mandatory pre-condition — do not raise `kill_switch_ws` without first raising this.
+
+    # ── BFF ───────────────────────────────────────────────────────────────────
+
+    HomeResponse:
+      type: object
+      required: [rates]
+      properties:
+        rates:
+          $ref: '#/components/schemas/RateDto'
+        alerts:
+          type: array
+          nullable: true
+          items:
+            $ref: '#/components/schemas/AlertResponse'
+          description: >
+            Null or absent when the user has no active alerts (~80% of users).
+            NOT cached in Redis to avoid polluting memory with empty-alert keys.
+        _degraded:
+          type: boolean
+          default: false
+          description: >
+            Set to `true` by `home_aggregator.go` when any upstream (pricing or core/alerts)
+            times out and stale cache is served. Transient signal — NOT persisted to Room.
+            Android client maps: `@SerialName("_degraded") val degraded: Boolean = false`.
+            When `true`, client must show `StaleRateBanner` immediately.
+            Clears automatically when the next response arrives with this field absent or false.
+
+    # ── Rates ─────────────────────────────────────────────────────────────────
+
+    RateDto:
+      type: object
+      required: [cityId, gold, silver, source, generatedAt, stale]
+      properties:
+        cityId:
+          type: string
+          example: mumbai
+        gold:
+          type: number
+          format: double
+          description: Gold rate per gram in INR.
+          example: 6150.50
+        silver:
+          type: number
+          format: double
+          description: Silver rate per gram in INR.
+          example: 75.20
+        source:
+          type: string
+          description: >
+            NOT a closed enum — new source strings may be added without a breaking change.
+            Current sole value: `"gemini"`. Future: `"mcx"`, `"manual_override"`.
+            Android client reads this as a plain String and passes it to `rate_viewed` analytics.
+            NEVER hardcode `"gemini"` as a string literal — always derive from `rate.source`.
+          example: gemini
+        generatedAt:
+          type: string
+          format: date-time
+          description: IST timestamp of the Gemini snapshot.
+          example: "2025-10-15T10:00:00+05:30"
+        stale:
+          type: boolean
+          description: >
+            `true` when the rate is outside the IST trading window or has failed the
+            2% sanity threshold check. Client shows `StaleRateBanner` when `true`.
+            NEVER compute staleness client-side from `cachedAt` — always trust this field.
+
+    RateHistoryPoint:
+      type: object
+      required: [gold, silver, source, generatedAt, stale]
+      properties:
+        gold:
+          type: number
+          format: double
+        silver:
+          type: number
+          format: double
+        source:
+          type: string
+        generatedAt:
+          type: string
+          format: date-time
+        stale:
+          type: boolean
+
+    # ── Catalog ───────────────────────────────────────────────────────────────
+
+    DesignResponse:
+      type: object
+      required: [id, title, description, category, style, metalType, imageUrl, tags, viewCount, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        description:
+          type: string
+        category:
+          type: string
+        style:
+          type: string
+        region:
+          type: string
+          nullable: true
+          description: Regional relevance tag. Null = applicable to all regions.
+        metalType:
+          type: string
+          enum: [gold, silver, both]
+        imageUrl:
+          type: string
+          format: uri
+        tags:
+          type: array
+          items:
+            type: string
+        viewCount:
+          type: integer
+          format: int64
+          description: >
+            Incremented via Redis INCR on `GET /catalog/designs/{id}` (detail view only).
+            Flushed to DB by `flush_view_counts_job.go` every 5 minutes.
+            NOT incremented on list endpoints (search/recommend).
+        createdAt:
+          type: string
+          format: date-time
+
+    PaginatedDesignResponse:
+      type: object
+      required: [items, page, limit, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/DesignResponse'
+        page:
+          type: integer
+          minimum: 1
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+        total:
+          type: integer
+          description: Total matching records (for pagination controls).
+
+    # ── Marketplace / Shops ───────────────────────────────────────────────────
+
+    CreateShopRequest:
+      type: object
+      required: [name, address, gstNumber, phone]
+      properties:
+        name:
+          type: string
+          description: Jeweller's shop name as it appears on invoices.
+          maxLength: 200
+        address:
+          type: string
+          description: Full shop address for invoice header.
+          maxLength: 500
+        gstNumber:
+          type: string
+          description: 15-character GSTIN.
+          pattern: '^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$'
+        phone:
+          type: string
+          description: Shop phone number for invoice footer.
+
+    ShopResponse:
+      type: object
+      required: [id, name, address, gstNumber, phone, userId, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        address:
+          type: string
+        gstNumber:
+          type: string
+        phone:
+          type: string
+        bannerUrl:
+          type: string
+          format: uri
+          nullable: true
+          description: >
+            CDN URL of the moderated, resized (max 1200×400 px) shop banner.
+            Null until `POST /shops/{id}/banner/confirm` completes moderation.
+        userId:
+          type: string
+          format: uuid
+        createdAt:
+          type: string
+          format: date-time
+
+    BannerUploadInitiateResponse:
+      type: object
+      required: [uploadUrl, objectKey]
+      properties:
+        uploadUrl:
+          type: string
+          format: uri
+          description: >
+            Presigned S3 URL. Valid for a short TTL (typically 15 minutes).
+            Client PUTs the banner image directly to this URL.
+            The S3 OkHttpClient MUST NOT include the `Authorization` header —
+            presigned URLs reject it with `SignatureDoesNotMatch`.
+        objectKey:
+          type: string
+          description: S3 object key. Must be sent back in `POST /shops/{id}/banner/confirm`.
+
+    BannerConfirmRequest:
+      type: object
+      required: [objectKey]
+      properties:
+        objectKey:
+          type: string
+          description: S3 object key received from `POST /shops/{id}/banner`.
+
+    # ── Invoices ──────────────────────────────────────────────────────────────
+
+    InvoiceLineItem:
+      type: object
+      required: [description, metalType, weightGrams, ratePerGram, makingCharges, amount]
+      properties:
+        description:
+          type: string
+          example: "22K Gold Bangle"
+        metalType:
+          type: string
+          enum: [gold, silver]
+        weightGrams:
+          type: number
+          format: double
+          minimum: 0.001
+        ratePerGram:
+          type: number
+          format: double
+          description: Rate in INR per gram at time of invoice.
+        makingCharges:
+          type: number
+          format: double
+          description: Making/labour charges in INR for this line item.
+          minimum: 0
+        amount:
+          type: number
+          format: double
+          description: >
+            Client-computed total for this line item: `metalValue + makingCharges`.
+            Server validates this matches its own computation.
+
+    GenerateInvoiceRequest:
+      type: object
+      required: [customerName, items, paymentMode]
+      properties:
+        customerName:
+          type: string
+          maxLength: 200
+        customerPhone:
+          type: string
+          nullable: true
+          description: >
+            Optional. Stored as a plain denormalised string.
+            There is NO customer_id FK or `/customers` backend endpoint.
+            Customer data is a local Room-only concept in the Android Diary.
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/InvoiceLineItem'
+        paymentMode:
+          type: string
+          enum: [cash, upi, card]
+        notes:
+          type: string
+          nullable: true
+          maxLength: 1000
+        goldRateOverride:
+          type: number
+          format: double
+          nullable: true
+          description: >
+            Optional. When > 0, the backend uses this rate instead of fetching from Redis.
+            Allows invoice generation even when the pricing service is degraded.
+            Sets `rateSource = "client_override"` on the response.
+            Client passes the live WebSocket rate it has on-screen.
+        silverRateOverride:
+          type: number
+          format: double
+          nullable: true
+          description: Same pattern as `goldRateOverride` for silver.
+      description: >
+        Rate limit: 60 invoices per shop per IST day.
+        Counter key: `invoice_count:{shopID}:{YYYY-MM-DD-IST}`.
+        Multiple authenticated owners of the same shop share this counter.
+        On limit exceeded: HTTP 429 `invoice_daily_limit_exceeded`.
+
+    InvoiceResponse:
+      type: object
+      required: [invoiceId, pdfBytes, generatedAt, rateSource]
+      properties:
+        invoiceId:
+          type: string
+          format: uuid
+        pdfBytes:
+          type: string
+          format: byte
+          description: >
+            Base64-encoded PDF bytes (ADR-001 DECIDED — not streaming, not S3 URL).
+            Go `encoding/json` base64-encodes `[]byte` automatically.
+            Kotlin `kotlinx.serialization` decodes base64 JSON strings to `ByteArray` automatically.
+            PDF is NOT stored server-side. Client persists to local device storage.
+            Size guaranteed < 500 KB by the two-step resize pipeline:
+              Step 1 (upload-confirm): banner resized to max 1200×400 px.
+              Step 2 (PDF builder): banner re-encoded to JPEG q80, max 600×160 px.
+        generatedAt:
+          type: string
+          format: date-time
+          description: IST timestamp of PDF generation.
+          example: "2025-10-15T11:30:00+05:30"
+        rateSource:
+          type: string
+          enum: [live, stale, client_override, manual_override]
+          description: >
+            Indicates the provenance of the rate embedded in the PDF.
+            `live`            — fresh Gemini snapshot.
+            `stale`           — Gemini snapshot was stale at generation time.
+            `client_override` — `goldRateOverride > 0` was supplied; client's live WS rate was used.
+            `manual_override` — admin manually inserted rate during a Gemini outage.
+            Client shows a warning snackbar for any value other than `live`.
+            Unknown future values must be treated as `stale` (future-proof).
+
+    # ── Health ────────────────────────────────────────────────────────────────
+
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+
+    ReadyResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ready, not_ready]
+        checks:
+          type: object
+          properties:
+            db:
+              type: boolean
+            redis:
+              type: boolean
+            listener:
+              type: boolean
+              description: True once the pg NOTIFY catch-up query has completed.
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+paths:
+
+  # ── Health ─────────────────────────────────────────────────────────────────
+
+  /health:
+    get:
+      tags: [health]
+      summary: Liveness probe
+      description: >
+        Returns 200 as soon as the HTTP server binds.
+        DO NOT use as a `depends_on` readiness condition — it fires too early.
+        Use `/health/ready` for container orchestration.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+      responses:
+        '200':
+          description: Service is alive.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /health/ready:
+    get:
+      tags: [health]
+      summary: Readiness probe
+      description: >
+        Returns 200 only when ALL of the following are true:
+        1. DB pool has issued at least one successful test query.
+        2. Redis connection is reachable (PING).
+        3. pg NOTIFY listener has started AND the `RebuildProjectionFromDB()` catch-up
+           query has completed (closes the race window on startup/reconnect).
+
+        Returns 503 until all conditions pass.
+        `docker-compose.prod.yml` `depends_on: service_healthy` MUST target this endpoint.
+        `start_period: 300s` required for `pricing` and `intelligence` services (they await
+        core's `/internal/subscriptions/active` with up to 8 retry attempts over ~4.25 min).
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+      responses:
+        '200':
+          description: Service is ready to handle traffic.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+        '503':
+          description: Service is not yet ready.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+
+  # ── Auth ───────────────────────────────────────────────────────────────────
+
+  /auth/send-otp:
+    post:
+      tags: [auth]
+      summary: Trigger OTP delivery
+      description: >
+        Triggers OTP delivery based on the active `OTP_PROVIDER` flag.
+
+        Firebase path (`provider = firebase` in response): backend is a no-op.
+        Client initiates `FirebaseAuth.verifyPhoneNumber()` which delivers the SMS directly.
+
+        MSG91 path (`provider = msg91` in response): backend calls MSG91 REST API.
+        OTP delivered via SMS to the provided phone number.
+
+        `both` mode: responds with `provider: "firebase"` — client always initiates Firebase flow first.
+
+        **Rate limit:** Max 5 OTP sends per E.164 phone per 60 minutes.
+        Exceeding this returns HTTP 429 `too_many_otp_requests`.
+        E.164 normalisation is applied before the Redis counter key is constructed
+        to prevent bypass via format variation.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendOtpRequest'
+      responses:
+        '200':
+          description: OTP triggered. Client proceeds based on `provider`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SendOtpResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: Verify OTP and issue JWT pair
+      description: >
+        Verifies the OTP (Firebase ID token or MSG91 code) and issues an access + refresh token pair.
+
+        **Verification sequence (backend):**
+        1. Play Integrity token verified via `PLAY_INTEGRITY_DECRYPTION_KEY`.
+        2. `OtpProvider.VerifyOTP(phone, token/otp)`.
+        3. On success: upsert user row → issue JWT pair.
+        4. On failure: HTTP 401 `otp_invalid`.
+
+        **Play Integrity errors:**
+        - `HTTP 403 device_not_trusted` — device is rooted/emulated. Permanent block screen.
+        - `HTTP 403 integrity_token_expired` — user took >~10 min. Recoverable; restart login flow.
+
+        **cityID handling:** Written ONLY on a fresh user insert (detected via `xmax == 0`).
+        Never overwrites an existing `users.city_id` for returning users.
+
+        **Server-side Firebase → MSG91 silent fallback (internal only):**
+        If `firebaseIdToken` is present AND the Firebase Admin SDK experiences an infrastructure
+        error (timeout/crash — NOT a credential failure), and `otp` is ALSO present in the same
+        request body, the server retries via MSG91. The Android v1 client never sends both fields
+        simultaneously — this is a server-internal defensive path only.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Authentication successful. JWT pair issued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthTokenResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /auth/register:
+    post:
+      tags: [auth]
+      summary: Register a new user (non-Android clients)
+      description: >
+        Retained for future non-Android clients (web dashboard, iOS if added).
+        The Android v1 client NEVER calls this endpoint — it always uses `/auth/login`
+        (the upsert path handles new users transparently).
+
+        Unlike `/auth/login`, `cityID` is ALWAYS written to `users.city_id` here —
+        the entire purpose of this call is to set up the user row.
+        `cityID` is mandatory; omitting it is a 400 validation error.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: User registered. JWT pair issued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthTokenResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '410':
+          $ref: '#/components/responses/Gone'
+
+  /auth/refresh:
+    post:
+      tags: [auth]
+      summary: Rotate refresh token and issue new JWT pair
+      description: >
+        Rotates the refresh token (old JTI revoked) and issues a new access + refresh pair.
+        The client must call this when the access token has < 3 minutes remaining TTL
+        (checked before initiating a WebSocket connection).
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: Token rotated successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthTokenResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '410':
+          $ref: '#/components/responses/Gone'
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: Revoke refresh token (adds JTI to Redis revocation set)
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LogoutRequest'
+      responses:
+        '204':
+          description: Logged out. JTI added to Redis revocation set.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '410':
+          $ref: '#/components/responses/Gone'
+
+  # ── Compliance ─────────────────────────────────────────────────────────────
+
+  /user/consent:
+    post:
+      tags: [compliance]
+      summary: Log user consent (privacy policy or ToS acceptance)
+      security:
+        - BearerAuth: []
+      description: >
+        On first app launch, the client makes EXACTLY TWO sequential calls:
+        one with `consentType: "privacy_policy"` and one with `consentType: "tos"`.
+        The AI Disclaimer is displayed on the consent screen for transparency but generates
+        NO call to this endpoint. `"ai_disclaimer"` is never a valid `consentType`.
+
+        Idempotent: same `userID + consentType + version` returns the existing record.
+        Safe on reinstall.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConsentRequest'
+      responses:
+        '201':
+          description: Consent logged.
+        '200':
+          description: Consent already logged (idempotent replay).
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '410':
+          $ref: '#/components/responses/Gone'
+
+  /user/account:
+    delete:
+      tags: [compliance]
+      summary: Delete user account (30-day grace period)
+      security:
+        - BearerAuth: []
+      description: >
+        Initiates account deletion. `userID` is derived from the JWT `sub` claim —
+        no `:userID` path parameter.
+
+        **Backend sequence:**
+        1. Soft-delete: `deleted_at = NOW()`.
+        2. Revoke all active JTIs.
+        3. pg NOTIFY `account_deleted` → intelligence service purges shop/invoice data immediately.
+        4. Schedule hard-delete after 30-day grace period (`hard_delete_job.go` daily cron).
+        5. Write audit entry.
+        6. Return `204 No Content`.
+
+        **Android client on `204`:**
+        - `appDatabase.clearAll()` (wipes ALL tables including Diary — irreversible).
+        - `tokenStore.clearAll()`.
+        - FCM token invalidation.
+        - Navigate to Login screen.
+        - Errors in `clearAll()` are caught and logged to Crashlytics; logout navigation proceeds
+          regardless — the server-side deletion is authoritative.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+      responses:
+        '204':
+          description: Account deletion initiated. 30-day grace period begins.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '410':
+          $ref: '#/components/responses/Gone'
+
+  # ── Billing ────────────────────────────────────────────────────────────────
+
+  /billing/verify:
+    post:
+      tags: [billing]
+      summary: Verify Google Play purchase receipt
+      security:
+        - BearerAuth: []
+      description: >
+        Verifies a Google Play purchase token via the Play Developer API.
+        On success: inserts/updates the subscription record and returns the updated tier.
+        Idempotent: `INSERT ON CONFLICT DO NOTHING` — re-sending the same token is safe.
+
+        **Note:** This was previously (incorrectly) documented as `POST /verify-receipt`.
+        The canonical public path is `/billing/verify`. `/verify-receipt` is not a valid route.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerifyReceiptRequest'
+      responses:
+        '200':
+          description: Receipt verified. Subscription activated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BillingResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /billing/restore:
+    post:
+      tags: [billing]
+      summary: Restore Google Play subscription
+      security:
+        - BearerAuth: []
+      description: >
+        Queries the Google Play Developer API for active subscriptions linked to the user's
+        Google account.
+
+        On active subscription found: update subscription record, issue new JWT with updated tier.
+        On NO active subscription: `HTTP 404 no_active_subscription`.
+        On any other error: `HTTP 503` — client shows generic retry error on Paywall screen.
+
+        Kill-switch note: `kill_switch_payments` is checked client-side only (hides Restore UI).
+        The server does not gate this endpoint on the kill-switch in v1.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Subscription restored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BillingResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  # ── Alerts ─────────────────────────────────────────────────────────────────
+
+  /alerts:
+    get:
+      tags: [alerts]
+      summary: List all price alerts for the authenticated user
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+      responses:
+        '200':
+          description: Alert list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '410':
+          $ref: '#/components/responses/Gone'
+
+    post:
+      tags: [alerts]
+      summary: Create a price threshold alert
+      security:
+        - BearerAuth: []
+      description: >
+        Creates a new price alert. On `2xx`, the Android client fires a `alert_created` Firebase
+        Analytics event with `{ metal, direction }`.
+
+        Alert evaluation runs every minute via `alert_threshold_job.go` (cron).
+        Delivery: FCM push notification (Android only) + pg NOTIFY `alert_delivered`.
+
+        FCM data payload contract (all 6 fields REQUIRED):
+        ```json
+        {
+          "type":      "price_alert",
+          "metal":     "gold" | "silver",
+          "direction": "above" | "below",
+          "threshold": "<float as string>",
+          "city_id":   "<cityID>",
+          "screen":    "rates"
+        }
+        ```
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAlertRequest'
+      responses:
+        '201':
+          description: Alert created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '410':
+          $ref: '#/components/responses/Gone'
+
+  /alerts/{id}:
+    delete:
+      tags: [alerts]
+      summary: Delete a price alert
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/AlertID'
+      responses:
+        '204':
+          description: Alert deleted.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/Gone'
+
+  # ── Engagement ─────────────────────────────────────────────────────────────
+
+  /engagement/device-token:
+    post:
+      tags: [engagement]
+      summary: Register or update FCM device token
+      security:
+        - BearerAuth: []
+      description: >
+        Upserted per `(userID, deviceID)` pair: `UPSERT ON CONFLICT (userID, deviceID) DO UPDATE`.
+
+        **Deferred token registration:** If `onNewToken` fires before the user is authenticated,
+        the token is stored in `PreferenceStore.pending_fcm_token`. On the next successful login,
+        `AuthRepository.login()` reads `pending_fcm_token`, calls this endpoint, and clears the key.
+        If `onNewToken` fires when already authenticated, registration proceeds immediately.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeviceTokenRequest'
+      responses:
+        '201':
+          description: Device token registered or updated.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '410':
+          $ref: '#/components/responses/Gone'
+
+  # ── Feature Flags ───────────────────────────────────────────────────────────
+
+  /config/feature-flags:
+    get:
+      tags: [config]
+      summary: Fetch feature flags and kill-switches
+      security:
+        - BearerAuth: []
+      description: >
+        Gateway path `/config/feature-flags` → rewrites to core `:4001/flags/public`.
+        All client-facing code MUST reference `/config/feature-flags` only — never the internal path.
+
+        Cached in Redis for 60 seconds. Invalidated via pg NOTIFY `flag_updated`.
+
+        On first install or network failure, the Android client falls back to `DEFAULT_FLAGS`:
+        ```
+        ai_enabled: true, shop_enabled: true, ws_enabled: true,
+        payments_enabled: true, catalog_enabled: true,
+        kill_switch_ai: false, kill_switch_ws: false, kill_switch_payments: false,
+        kill_switch_catalog: false, kill_switch_image_search: true  ← BLOCKED BY DEFAULT
+        ```
+        The server MUST seed these values in `008_create_feature_flags.sql` before the first deploy.
+        An empty `GET /config/feature-flags` response causes `killSwitchImageSearch` to default
+        to `false`, enabling an unimplemented backend endpoint on fresh install.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+      responses:
+        '200':
+          description: Current feature flags, kill-switches, and params.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FeatureFlagsResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '410':
+          $ref: '#/components/responses/Gone'
+
+  # ── BFF ─────────────────────────────────────────────────────────────────────
+
+  /bff/home:
+    get:
+      tags: [bff]
+      summary: Aggregated home screen response (rates + alerts)
+      security:
+        - BearerAuth: []
+      description: >
+        Fan-out aggregation via `errgroup` with an 800ms per-upstream deadline.
+        Scope: **rates + alerts ONLY.** Shop data is NOT included — fetch via `GET /shops`
+        when the ShopBanner feature is accessed.
+
+        **BFF cache split (Redis):**
+        - `home:shared:{cityID}` — city-scoped rate cache, TTL 30s. Identical for all users in a city.
+        - `home:alerts:{userID}` — per-user alert cache, TTL 30s. Skipped when user has zero alerts.
+
+        **cityID resolution:** Extracted from the JWT `region` claim by `jwt_pre_validator.go`.
+        Injected into the request as `X-Region` header. No IP geolocation.
+
+        **Degraded mode:** If any upstream times out, stale cache is served with `_degraded: true`.
+        Partial responses (one upstream OK, one degraded) are valid.
+
+        **WS kill-switch polling:** When `killSwitchWs == true`, the Android client polls this
+        endpoint every 30 seconds (±5s mandatory jitter) while foregrounded only, using
+        `lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED)`.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+      responses:
+        '200':
+          description: "Aggregated home response. May include _degraded=true."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HomeResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  # ── Rates ───────────────────────────────────────────────────────────────────
+
+  /rates/{cityID}:
+    get:
+      tags: [rates]
+      summary: Get current gold and silver rate for a city
+      security:
+        - BearerAuth: []
+      description: >
+        Reads from Redis snapshot (TTL 1h). Falls back to DB if Redis misses.
+
+        Stale logic:
+        - `stale: true` when no fresh snapshot exists within the IST trading window
+          (Mon–Sat 10:00–19:00 IST) or when the 2% sanity threshold rejected the latest snapshot.
+        - Client MUST show `StaleRateBanner` when `stale == true`.
+        - NEVER compute staleness client-side from `cachedAt`.
+
+        Cold-start edge case: if no snapshot exists in Redis OR DB AND Gemini is unreachable,
+        returns `HTTP 404 city_rates_not_available`. Client shows a "Rates not available yet"
+        state — NOT a retry spinner.
+
+        Rate history is available at `GET /rates/{cityID}/history`.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/CityID'
+      responses:
+        '200':
+          description: Current rate for the city.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RateDto'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/Gone'
+
+  /rates/{cityID}/history:
+    get:
+      tags: [rates]
+      summary: Get historical rate snapshots for a city
+      security:
+        - BearerAuth: []
+      description: >
+        Returns the list of historical Gemini AI snapshots for the given city.
+        Used by `RateHistoryScreen` to render the Vico line chart.
+
+        `RateHistoryScreen.kt` and `RateHistoryViewModel.kt` must be explicitly scaffolded
+        in the `feature/rates/` module — they are not auto-generated.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/CityID'
+      responses:
+        '200':
+          description: Historical rate snapshots, newest-first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RateHistoryPoint'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '410':
+          $ref: '#/components/responses/Gone'
+
+  # ── Catalog ─────────────────────────────────────────────────────────────────
+
+  /catalog/search:
+    get:
+      tags: [catalog]
+      summary: Full-text search the jewellery design catalog
+      security:
+        - BearerAuth: []
+      description: >
+        PostgreSQL `tsvector` full-text search across `title + description + tags`.
+        Results are boosted by region match (+0.3) and trending score (+0.1).
+        Empty results fall back to trending (ORDER BY view_count).
+
+        Gated by `catalogEnabled` feature flag — entry point hidden when `killSwitchCatalog == true`.
+
+        On every debounced query that completes (including empty results), the Android client
+        fires `catalog_searched` Firebase Analytics event with `{ region, resultCount }`.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Full-text search query.
+        - name: region
+          in: query
+          required: false
+          schema:
+            type: string
+          description: City/region slug for relevance boosting.
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+      responses:
+        '200':
+          description: Paginated search results.
+          headers:
+            X-Ai-Quota-Used:
+              $ref: '#/components/headers/XAiQuotaUsed'
+            X-Ai-Quota-Limit:
+              $ref: '#/components/headers/XAiQuotaLimit'
+            X-Ai-Quota-Reset-At:
+              $ref: '#/components/headers/XAiQuotaResetAt'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedDesignResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '410':
+          $ref: '#/components/responses/Gone'
+
+  /catalog/recommend:
+    get:
+      tags: [catalog]
+      summary: Regional jewellery design recommendations
+      security:
+        - BearerAuth: []
+      description: >
+        Returns designs ranked by view_count for the given region.
+        Redis cache: `catalog:rec:{region}:{page}`, TTL 300 seconds.
+        Query: `WHERE region = $1 OR region IS NULL ORDER BY view_count DESC`.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+        - name: region
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+      responses:
+        '200':
+          description: Paginated regional recommendations.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedDesignResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '410':
+          $ref: '#/components/responses/Gone'
+
+  /catalog/designs/{id}:
+    get:
+      tags: [catalog]
+      summary: Get design detail (increments view count)
+      security:
+        - BearerAuth: []
+      description: >
+        Returns full design detail. This call is the ONLY view-count increment point —
+        `IncrViewCount(designID)` is called atomically via Lua INCR+EXPIRE in Redis
+        (`view_count_cache.go`). List endpoints (search/recommend) do NOT increment.
+
+        View counts are flushed to the DB every 5 minutes by `flush_view_counts_job.go`.
+
+        On network error or offline: render from Room cache with "View count may be outdated" indicator.
+        `view_count` displayed MUST come from this API response — not from the Room-cached list data.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Design detail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DesignResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/Gone'
+
+  # NOTE: POST /catalog/image-search is intentionally ABSENT.
+  # Implementation gate: backend Gemini Vision pipeline + Android killSwitchImageSearch=false
+  # must ship in the same release. Do not add a stub handler before then.
+  # Tracked as: CATALOG-IMAGE-SEARCH-v1.
+
+  # ── Shops ───────────────────────────────────────────────────────────────────
+
+  /shops:
+    post:
+      tags: [marketplace]
+      summary: Register a shop profile
+      security:
+        - BearerAuth: []
+      description: >
+        Gated by subscription tier — only PREMIUM users can register a shop.
+        Checked via `subscription_projection.go` Redis read model (never cross-schema DB query).
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateShopRequest'
+      responses:
+        '201':
+          description: Shop registered.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShopResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Subscription tier insufficient.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '410':
+          $ref: '#/components/responses/Gone'
+
+    get:
+      tags: [marketplace]
+      summary: Get shop profiles for the authenticated user
+      security:
+        - BearerAuth: []
+      description: >
+        Returns shops owned by the authenticated user (scoped to JWT `sub`).
+        Fetched separately from the BFF home call — shop data is NOT included in `GET /bff/home`.
+        Client fetches this only when the ShopBanner feature is accessed.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+      responses:
+        '200':
+          description: List of shops owned by the user.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ShopResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '410':
+          $ref: '#/components/responses/Gone'
+
+  /shops/{id}/banner:
+    post:
+      tags: [marketplace]
+      summary: Initiate shop banner upload (get presigned S3 URL)
+      security:
+        - BearerAuth: []
+      description: >
+        Returns a presigned S3 upload URL. The client PUTs the banner image directly to this URL.
+
+        **S3 client note:** The `@Named("s3")` OkHttpClient MUST NOT include `AuthInterceptor`.
+        Presigned URLs reject the `Authorization` header with `SignatureDoesNotMatch`.
+
+        After the PUT, call `POST /shops/{id}/banner/confirm` to trigger moderation and resize.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/ShopID'
+      responses:
+        '200':
+          description: Presigned upload URL and object key.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BannerUploadInitiateResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Caller does not own this shop.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/Gone'
+
+  /shops/{id}/banner/confirm:
+    post:
+      tags: [marketplace]
+      summary: Confirm banner upload and trigger moderation + resize
+      security:
+        - BearerAuth: []
+      description: >
+        Triggers the two-stage banner pipeline:
+
+        **Stage 1 — Content moderation (Gemini Vision):**
+        If the banner fails moderation, returns `HTTP 422` with `error: content_violation`.
+        The Android client surfaces a "Banner does not meet our content policy" message.
+
+        **Stage 2 — Resize:**
+        Banner is resized to MAX 1200×400 px (aspect-ratio preserving) and stored in CDN.
+        This is Step 1 of the two-step resize pipeline. Step 2 (600×160 px, JPEG q80)
+        occurs at PDF build time in `invoice_pdf_builder.go`.
+
+        On success: `bannerUrl` is populated on the shop record.
+        Banner bytes are pre-warmed in the `invoice_pdf_builder.go` in-process cache (1h TTL).
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/ShopID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BannerConfirmRequest'
+      responses:
+        '200':
+          description: Banner moderated and stored. Updated shop record returned.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShopResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Caller does not own this shop.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '422':
+          description: Banner failed content moderation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+              example:
+                value: { error: content_violation, message: "Banner does not meet our content policy" }
+
+  # ── Invoices ────────────────────────────────────────────────────────────────
+
+  /shops/{id}/invoice/generate:
+    post:
+      tags: [invoices]
+      summary: Generate a GST-aware PDF invoice
+      security:
+        - BearerAuth: []
+      description: >
+        Generates a PDF invoice for the shop. PDF is returned as base64 bytes in the JSON
+        response body (ADR-001 DECIDED — not streaming, not a CDN URL).
+
+        **Rate limit:** 60 invoices per shop per IST day.
+        Counter key: `invoice_count:{shopID}:{YYYY-MM-DD-IST}`.
+        Multiple authenticated owners of the same shop share this counter.
+        On limit exceeded: `HTTP 429 invoice_daily_limit_exceeded`.
+
+        **Rate source resolution (priority order):**
+        1. `GoldRateOverride > 0` → `rateSource = "client_override"`.
+        2. `snapshot.Source == "manual_override"` → `rateSource = "manual_override"`.
+        3. `snapshot.Stale == true` → `rateSource = "stale"`.
+        4. Fresh live snapshot → `rateSource = "live"`.
+
+        When pricing service is unreachable and no override is supplied → `HTTP 503 rate_unavailable`.
+
+        **PDF layout:** Banner image (Step 2 resize: 600×160 px JPEG q80) → shop info →
+        invoice meta → customer info → line items table → totals → footer.
+        Font: Noto Sans (Devanagari support). Paper: A4 portrait.
+        Size guaranteed < 500 KB.
+
+        **In-flow stale rate handling (v1 decision):** The generate button is NOT disabled
+        when `isStale == true`. A post-generation snackbar warns if `rateSource != "live"`.
+        Pre-generation gating is deferred to v2.
+
+        On success, the Android client fires `bill_generated` Firebase Analytics event
+        with `{ paymentMode }`.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/ShopID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenerateInvoiceRequest'
+      responses:
+        '200':
+          description: >
+            Invoice generated. PDF returned as base64 bytes.
+            Client must persist PDF to local storage immediately — it is not stored server-side.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvoiceResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Caller does not own this shop.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+# ---------------------------------------------------------------------------
+# WebSocket (informational — not expressible in OpenAPI 3.0)
+# ---------------------------------------------------------------------------
+# Endpoint:  wss://ws.mahaswarna.com:4002
+# Path:      /ws
+# Protocol:  WebSocket (RFC 6455) + gorilla/websocket
+#
+# ADR-002 DECIDED: WebSocket connects DIRECTLY to pricing service (port 4002),
+# bypassing the gateway. Rationale: avoids a second TCP hop and goroutine-per-connection
+# in the gateway at 600–900 concurrent WS connections. The pricing service self-enforces
+# all security controls (JWT auth, handshake rate limiting, MaxBytesReader).
+#
+# AUTHENTICATION:
+#   JWT is presented during the WS HTTP upgrade handshake.
+#   WebSocket connection is only initiated when the access token has > 3 minutes remaining TTL.
+#   If TTL < 3 minutes: `POST /auth/refresh` first, then connect.
+#
+# HANDSHAKE RATE LIMIT (enforced by ws_server.go — gateway is bypassed):
+#   Redis key: ws_hs:{ip} — INCR with 60s EXPIRE
+#   Limit: 20 new upgrade attempts per IP per minute.
+#   Exceeding: HTTP 429 before gorilla upgrade.
+#
+# TLS ENFORCEMENT:
+#   Plain HTTP to :4002 returns HTTP 403 in production.
+#   Hetzner firewall restricts :4002 to inbound TCP only.
+#
+# MESSAGE ENVELOPE (bidirectional):
+#   { "channel": "rates" | "alerts", "payload": <JsonElement> }
+#
+# OUTBOUND MESSAGES (server → client):
+#   channel: "rates"  payload: RateDto  (fanout on ai_rate_snapshot_ready pg NOTIFY)
+#   channel: "alerts" payload: AlertResponse  (on alert threshold crossed)
+#
+# HEARTBEAT:
+#   Ping interval: 30 seconds
+#   Pong read deadline: 10 seconds after ping sent
+#   Stale entry prune window: 40 seconds max
+#
+# RECONNECT STRATEGY (Android client):
+#   Exponential backoff: 1s → 2s → 4s → ... → 60s cap
+#   StaleRateBanner shown when disconnected > 30 seconds
+#   On server restart: pricing service sends WebSocket CloseGoingAway frame
+#   to all connections before shutdown (15-second graceful drain window)
+#
+# FANOUT BEHAVIOUR:
+#   BufferedFanout: 50ms batch window — only the MOST RECENT rate per cityID is pushed.
+#   Intermediate updates within the window are intentionally dropped.
+#   Redis pub/sub drives the fan-out: channel `rate:{cityID}`.
