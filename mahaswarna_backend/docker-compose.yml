@@ -135,7 +135,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
+      redis-sentinel:
         condition: service_healthy
     volumes:
       - ./migrations:/migrations:ro
