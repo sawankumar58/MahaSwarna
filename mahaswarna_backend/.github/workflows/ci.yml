@@ -1,0 +1,34 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+      - name: Lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+      - name: Vet
+        run: go vet ./...
+      - name: Test (race detector)
+        run: go test ./... -race -cover
+      - name: Compliance gate
+        run: |
+          test -f test/core/delete_account_usecase_test.go \
+            || { echo 'FATAL: delete_account_usecase_test.go missing'; exit 1; }
+      - name: Build all services
+        run: |
+          go build ./src/gateway/...
+          go build ./src/services/core/...
+          go build ./src/services/pricing/...
+          go build ./src/services/intelligence/...
+

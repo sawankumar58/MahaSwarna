@@ -1,0 +1,16 @@
+# Binaries
+*.exe
+*.test
+
+# Env files — never commit production secrets
+.env.production
+.env.staging
+
+# Go workspace sum
+go.work.sum
+
+# IDE
+.idea/
+.vscode/
+*.iml
+

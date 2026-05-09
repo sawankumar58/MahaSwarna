@@ -1,0 +1,145 @@
+# MahaSwarna — Production Stack
+# Extends docker-compose.yml with: restart:always, resource limits, no dev ports.
+#
+# LAUNCH GATE: run scripts/pre_deploy_check.sh before first deploy.
+# SENTINEL QUORUM=2: requires redis-primary + redis-replica + redis-sentinel
+#   to be healthy simultaneously before gateway starts.
+#
+# Port exposure policy (Hetzner firewall must enforce externally):
+#   :4000 — gateway (public REST)
+#   :4002 — pricing WebSocket (public WSS — ADR-002)
+#   :4001, :4003 — Docker bridge only. NOT exposed. Never add to this file.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+version: "3.9"
+
+services:
+
+  postgres:
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 8g
+        reservations:
+          memory: 6g
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  redis-primary:
+    restart: always
+    command: >
+      redis-server
+        --maxmemory 2gb
+        --maxmemory-policy allkeys-lru
+        --save 60 1000
+        --appendonly yes
+        --tcp-keepalive 60
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+        reservations:
+          memory: 256m
+
+  redis-replica:
+    restart: always
+    command: >
+      redis-server
+        --replicaof redis-primary 6379
+        --maxmemory 2gb
+        --maxmemory-policy allkeys-lru
+        --tcp-keepalive 60
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+        reservations:
+          memory: 256m
+
+  redis-sentinel:
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+
+  # MinIO: not deployed in prod — use AWS S3
+  minio:
+    profiles: ["dev-only"]  # excluded from prod compose
+
+  migrate:
+    restart: "no"
+
+  core:
+    restart: always
+    ports: !reset []          # remove dev port binding
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "1.0"
+        reservations:
+          memory: 256m
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+
+  pricing:
+    restart: always
+    ports:
+      - "4002:4002"           # WSS — public (ADR-002)
+    healthcheck:
+      start_period: 300s      # awaits core /internal/subscriptions/active — up to 8 retries
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "1.0"
+        reservations:
+          memory: 256m
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+
+  intelligence:
+    restart: always
+    ports: !reset []          # internal only — NOT publicly exposed
+    deploy:
+      resources:
+        limits:
+          memory: 768m        # higher: PDF builder + tsvector search
+          cpus: "1.5"
+        reservations:
+          memory: 512m
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+
+  gateway:
+    restart: always
+    ports:
+      - "4000:4000"           # REST — public
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "1.0"
+        reservations:
+          memory: 256m
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"

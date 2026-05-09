@@ -1,0 +1,13 @@
+go 1.23
+
+use (
+	./src/contracts
+	./src/shared
+	./src/infrastructure
+	./src/observability
+	./src/gateway
+	./src/services/core
+	./src/services/pricing
+	./src/services/intelligence
+)
+
