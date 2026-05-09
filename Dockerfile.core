@@ -1,0 +1,16 @@
+FROM golang:1.23-alpine AS builder
+WORKDIR /app
+COPY go.work go.work.sum ./
+COPY src/contracts/ ./src/contracts/
+COPY src/shared/ ./src/shared/
+COPY src/infrastructure/ ./src/infrastructure/
+COPY src/observability/ ./src/observability/
+COPY src/services/core/ ./src/services/core/
+COPY src/gateway/ ./src/gateway/
+RUN go build -o /bin/core ./src/services/core/...
+
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates tzdata
+COPY --from=builder /bin/core /bin/core
+ENTRYPOINT ["/bin/core"]
+
