@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- TODO: define gold luxury colour palette -->
+    <color name="gold_primary">#B8860B</color>
+    <color name="gold_on_primary">#FFFFFF</color>
+</resources>
+

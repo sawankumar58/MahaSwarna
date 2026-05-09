@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">MahaSwarna</string>
+    <!-- Calculator -->
+    <string name="calculator_gst_label_buy">GST (% if registered supplier)</string>
+    <string name="calculator_gst_hint_buy">Enter 3% if buying from GST-registered supplier</string>
+</resources>
+
