@@ -1,1 +1,1 @@
--- DROP TABLE IF EXISTS gold_rates;
+DROP TABLE IF EXISTS gold_rates;

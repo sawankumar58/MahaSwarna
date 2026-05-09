@@ -1,0 +1,287 @@
+# MahaSwarna — Development Stack
+# All services on one bridge network. Redis Sentinel 3-node matches prod topology.
+# Usage:
+#   cp .env.example .env && fill secrets
+#   docker compose up --build
+#   docker compose run --rm migrate   # run once, or on schema change
+
+version: "3.9"
+
+networks:
+  mahaswarna-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-primary-data:
+  minio-data:
+
+services:
+
+  # ── PostgreSQL ────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       mahaswarna
+      POSTGRES_USER:     mahaswarna
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    command: >
+      postgres
+        -c shared_preload_libraries=pg_stat_statements
+        -c max_connections=200
+        -c shared_buffers=256MB
+        -c work_mem=4MB
+        -c wal_level=logical
+        -c log_min_duration_statement=200
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mahaswarna -d mahaswarna"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - mahaswarna-net
+
+  # ── Redis Sentinel cluster (3-node) ──────────────────────────────────────
+  redis-primary:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: >
+      redis-server
+        --maxmemory 512mb
+        --maxmemory-policy allkeys-lru
+        --save 60 1000
+        --appendonly yes
+    volumes:
+      - redis-primary-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - mahaswarna-net
+
+  redis-replica:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: >
+      redis-server
+        --replicaof redis-primary 6379
+        --maxmemory 512mb
+        --maxmemory-policy allkeys-lru
+    depends_on:
+      redis-primary:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - mahaswarna-net
+
+  redis-sentinel:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-sentinel /etc/redis/sentinel.conf
+    configs:
+      - source: sentinel_conf
+        target: /etc/redis/sentinel.conf
+    depends_on:
+      redis-primary:
+        condition: service_healthy
+      redis-replica:
+        condition: service_healthy
+    ports:
+      - "26379:26379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "26379", "SENTINEL", "masters"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - mahaswarna-net
+
+  # ── MinIO (S3-compatible, dev only) ───────────────────────────────────────
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER:     ${MINIO_ROOT_USER:-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio123}
+    volumes:
+      - minio-data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - mahaswarna-net
+
+  # ── Migrations (one-shot) ─────────────────────────────────────────────────
+  migrate:
+    image: migrate/migrate:v4.18.1
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./migrations:/migrations:ro
+      - ./scripts:/scripts:ro
+    entrypoint: ["/bin/sh", "/scripts/migrate.sh"]
+    environment:
+      DATABASE_URL: postgres://mahaswarna:${POSTGRES_PASSWORD:-changeme}@postgres:5432/mahaswarna?sslmode=disable
+    networks:
+      - mahaswarna-net
+
+  # ── Core :4001 ────────────────────────────────────────────────────────────
+  core:
+    build:
+      context: .
+      dockerfile: Dockerfile.core
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL:        postgres://mahaswarna:${POSTGRES_PASSWORD:-changeme}@postgres:5432/mahaswarna?sslmode=disable
+      REDIS_SENTINEL_1:    redis-sentinel:26379
+      REDIS_SENTINEL_2:    redis-sentinel:26379
+      REDIS_SENTINEL_3:    redis-sentinel:26379
+      APP_ENV:             development
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis-sentinel:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "4001:4001"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4001/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    networks:
+      - mahaswarna-net
+
+  # ── Pricing :4002 ─────────────────────────────────────────────────────────
+  pricing:
+    build:
+      context: .
+      dockerfile: Dockerfile.pricing
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL:        postgres://mahaswarna:${POSTGRES_PASSWORD:-changeme}@postgres:5432/mahaswarna?sslmode=disable
+      REDIS_SENTINEL_1:    redis-sentinel:26379
+      REDIS_SENTINEL_2:    redis-sentinel:26379
+      REDIS_SENTINEL_3:    redis-sentinel:26379
+      CORE_BASE_URL:       http://core:4001
+      APP_ENV:             development
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis-sentinel:
+        condition: service_healthy
+      core:
+        condition: service_healthy
+    ports:
+      - "4002:4002"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4002/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 300s  # pricing awaits core /internal/subscriptions/active — up to 8 retries ~4.25 min
+    networks:
+      - mahaswarna-net
+
+  # ── Intelligence :4003 ────────────────────────────────────────────────────
+  intelligence:
+    build:
+      context: .
+      dockerfile: Dockerfile.intelligence
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL:        postgres://mahaswarna:${POSTGRES_PASSWORD:-changeme}@postgres:5432/mahaswarna?sslmode=disable
+      REDIS_SENTINEL_1:    redis-sentinel:26379
+      REDIS_SENTINEL_2:    redis-sentinel:26379
+      REDIS_SENTINEL_3:    redis-sentinel:26379
+      CORE_BASE_URL:       http://core:4001
+      PRICING_BASE_URL:    http://pricing:4002
+      S3_ENDPOINT:         http://minio:9000
+      APP_ENV:             development
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis-sentinel:
+        condition: service_healthy
+      core:
+        condition: service_healthy
+    ports:
+      - "4003:4003"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4003/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 300s
+    networks:
+      - mahaswarna-net
+
+  # ── Gateway :4000 ─────────────────────────────────────────────────────────
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.gateway
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      CORE_BASE_URL:        http://core:4001
+      PRICING_BASE_URL:     http://pricing:4002
+      INTELLIGENCE_BASE_URL: http://intelligence:4003
+      REDIS_SENTINEL_1:     redis-sentinel:26379
+      REDIS_SENTINEL_2:     redis-sentinel:26379
+      REDIS_SENTINEL_3:     redis-sentinel:26379
+      APP_ENV:              development
+    depends_on:
+      core:
+        condition: service_healthy
+      pricing:
+        condition: service_healthy
+      intelligence:
+        condition: service_healthy
+    ports:
+      - "4000:4000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - mahaswarna-net
+
+configs:
+  sentinel_conf:
+    content: |
+      port 26379
+      sentinel monitor mymaster redis-primary 6379 2
+      sentinel down-after-milliseconds mymaster 5000
+      sentinel failover-timeout mymaster 60000
+      sentinel parallel-syncs mymaster 1
+      sentinel resolve-hostnames yes
+      sentinel announce-hostnames yes

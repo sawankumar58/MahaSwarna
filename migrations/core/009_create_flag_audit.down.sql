@@ -1,1 +1,1 @@
--- DROP TABLE IF EXISTS flag_audit;
+DROP TABLE IF EXISTS flag_audit;
