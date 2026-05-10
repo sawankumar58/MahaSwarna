@@ -84,24 +84,7 @@ func RegionFromCtx(ctx context.Context) string {
 	return v
 }
 
-// ───────────────────────────────────────────────────────────────────────────────
-
-const serviceTokenHeader = "X-Service-Token"
-
-// ServiceAuth validates the internal service-to-service token (HMAC secret).
-// Used on internal-only endpoints not exposed through the gateway.
-func ServiceAuth(secret string) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			tok := r.Header.Get(serviceTokenHeader)
-			if tok != secret || secret == "" {
-				http.Error(w, "forbidden", http.StatusForbidden)
-				return
-			}
-			next.ServeHTTP(w, r)
-		})
-	}
-}
+// ServiceAuth → service_auth.go
 
 // ───────────────────────────────────────────────────────────────────────────────
 

@@ -58,6 +58,13 @@ func (r *UserRepository) UpdateTier(ctx context.Context, id uuid.UUID, tier stri
 	return err
 }
 
+// UpdateCityID unconditionally overwrites city_id. Called only by RegisterUseCase;
+// LoginUseCase uses UpsertUser which guards against overwriting on existing rows.
+func (r *UserRepository) UpdateCityID(ctx context.Context, id uuid.UUID, cityID string) error {
+	_, err := r.db.Exec(ctx, `UPDATE users SET city_id=$1,updated_at=NOW() WHERE id=$2`, cityID, id)
+	return err
+}
+
 func (r *UserRepository) PendingHardDeletes(ctx context.Context) ([]domain.User, error) {
 	rows, err := r.db.Query(ctx, `SELECT id,phone,city_id,tier,created_at,updated_at,deleted_at,hard_deleted_at
 		FROM users WHERE deleted_at IS NOT NULL AND deleted_at < NOW()-INTERVAL '30 days' AND hard_deleted_at IS NULL`)
