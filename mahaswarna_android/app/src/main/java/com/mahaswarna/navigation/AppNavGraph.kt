@@ -45,6 +45,10 @@ fun AppNavGraph(
             com.mahaswarna.feature.auth.ui.PhoneEntryScreen(navController = navController)
         }
 
+        composable<Route.OtpEntry> {
+            com.mahaswarna.feature.auth.ui.OtpScreen(navController = navController)
+        }
+
         composable<Route.Consent> {
             // Back navigation disabled — see ConsentScreen
             ConsentScreen(navController = navController)
@@ -56,6 +60,13 @@ fun AppNavGraph(
 
         composable<Route.Rates> {
             com.mahaswarna.feature.rates.ui.RatesDashboardScreen(navController = navController)
+        }
+
+        composable<Route.RateHistory> {
+            com.mahaswarna.feature.rates.ui.RateHistoryScreen(
+                cityId = "mumbai",
+                navController = navController,
+            )
         }
 
         composable<Route.Calculator> {

@@ -97,4 +97,30 @@ class PreferenceStore @Inject constructor(
     fun getConsentAccepted(): Flow<Boolean> = context.dataStore.data.map { prefs ->
         prefs[CONSENT_ACCEPTED] ?: false
     }
+
+    // ── Feature Flags Cache ───────────────────────────────────────────────────
+    // Stored as serialised JSON string; not sensitive — DataStore is correct here.
+
+    private val FLAGS_CACHE = stringPreferencesKey("feature_flags_cache")
+
+    fun setFlagsCache(json: String) = runBlocking {
+        context.dataStore.edit { it[FLAGS_CACHE] = json }
+    }
+
+    fun getFlagsCache(): String? = runBlocking {
+        context.dataStore.data.first()[FLAGS_CACHE]
+    }
+
+    // ── Last Refreshed Timestamp ──────────────────────────────────────────────
+
+    private val LAST_REFRESHED = longPreferencesKey("last_refreshed_at")
+
+    fun setLastRefreshed(time: Long) = runBlocking {
+        context.dataStore.edit { it[LAST_REFRESHED] = time }
+    }
+
+    fun getLastRefreshed(): Long = runBlocking {
+        context.dataStore.data.first()[LAST_REFRESHED] ?: 0L
+    }
+
 }

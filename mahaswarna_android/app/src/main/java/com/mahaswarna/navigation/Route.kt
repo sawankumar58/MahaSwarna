@@ -19,6 +19,9 @@ sealed class Route {
     @Serializable data object RegisterShop    : Route()
     @Serializable data object UpdateRequired  : Route()  // non-dismissible on 410
 
+    @Serializable data object OtpEntry      : Route()
+    @Serializable data object RateHistory  : Route()
+
     @Serializable
     data class Calculator(
         val goldRate: Double,
