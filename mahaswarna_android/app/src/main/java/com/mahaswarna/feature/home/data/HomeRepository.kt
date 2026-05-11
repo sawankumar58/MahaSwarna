@@ -1,12 +1,20 @@
 package com.mahaswarna.feature.home.data
 
 import com.mahaswarna.core.storage.PreferenceStore
+import com.mahaswarna.data.mapper.toAlertList
+import com.mahaswarna.data.mapper.toDomain
+import com.mahaswarna.data.mapper.toEntity
 import com.mahaswarna.feature.home.domain.HomeData
 import com.mahaswarna.feature.home.domain.RateInfo
+import com.mahaswarna.local.dao.AlertDao
+import com.mahaswarna.local.dao.HomeDao
+import com.mahaswarna.local.dao.RateDao
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -15,112 +23,121 @@ import javax.inject.Singleton
  *
  * Source priority: WS push > REST pull > Room cache.
  *
- * INVARIANT: after every BFF fetch, ALL fields must be persisted to Room:
- *   homeDao.upsert(home.toRoomEntity())
- *   ratesDao.upsertAll(home.rates.map { it.toRoomEntity() })
- *   alertsDao.upsertAll(home.alerts.map { it.toRoomEntity() })
+ * INVARIANT: after every BFF fetch, ALL fields are persisted to Room:
+ *   homeDao.upsert(response.toEntity())
+ *   rateDao.upsertRate(response.rates.toEntity())
+ *   alertDao.upsertAll(response.alerts.map { it.toEntity(...) })
  *   prefs.setLastRefreshed(System.currentTimeMillis())
- * Never hold HomeResponse in ViewModel memory only — next cold start renders from Room.
  *
- * degradedFlow: StateFlow<Boolean> — updated on every BFF response (including polling).
- *   _degraded.value = response._degraded ?: false
- * NOT persisted to Room — transient signal only.
- * Resets correctly when polling mode is lifted (clears to false on next non-degraded response).
+ * [degradedFlow]: transient — NOT persisted to Room.
+ * Resets on next non-degraded BFF response.
  */
 @Singleton
 class HomeRepository @Inject constructor(
     private val bffApi: BffApi,
     private val preferenceStore: PreferenceStore,
-    // Room DAOs injected here in full implementation; stubs omitted for brevity
-    // private val homeDao: HomeDao,
-    // private val ratesDao: RatesDao,
-    // private val alertsDao: AlertsDao,
+    private val homeDao: HomeDao,
+    private val rateDao: RateDao,
+    private val alertDao: AlertDao,
 ) {
-    // ── Degraded signal ───────────────────────────────────────────────────────
+    // ── Degraded signal (transient — never persisted) ─────────────────────────
     private val _degraded = MutableStateFlow(false)
     val degradedFlow: StateFlow<Boolean> = _degraded.asStateFlow()
 
-    // ── In-memory last known state (populated from Room + REST) ───────────────
-    private val _homeData = MutableStateFlow<HomeData?>(null)
-    val homeDataFlow: Flow<HomeData?> = _homeData.asStateFlow()
+    // ── Composed home data from Room ──────────────────────────────────────────
+
+    /**
+     * Reactive stream combining the latest cached rate (for the user's selected city)
+     * and cached alerts into a [HomeData] domain object.
+     *
+     * Emits null until Room is populated (first install or post-logout wipe).
+     * Use [refresh] to trigger a BFF fetch; Room emission drives recomposition automatically.
+     */
+    fun getCachedHome(cityId: String): Flow<HomeData?> =
+        combine(
+            rateDao.getLatest(cityId),
+            homeDao.observe(),
+        ) { rateEntity, homeEntity ->
+            if (rateEntity == null) return@combine null
+            HomeData(
+                rate   = rateEntity.toDomain(),
+                alerts = homeEntity?.toAlertList() ?: emptyList(),
+            )
+        }
 
     /**
      * Fetch fresh home data from BFF REST.
-     * Persists ALL fields to Room. Updates degradedFlow.
-     * Callers (HomeViewModel) collect homeDataFlow reactively — no need to observe return value.
+     * Persists ALL fields to Room. Updates [degradedFlow].
      *
-     * On failure: silently keeps last cached data; degradedFlow unchanged.
+     * On failure: silently keeps last cached data; [degradedFlow] retains last value.
+     * Callers (HomeViewModel) collect [getCachedHome] reactively — Room emission propagates
+     * the update automatically without inspecting this function's return value.
      */
-    suspend fun refresh() {
+    suspend fun refresh(cityId: String) {
         runCatching {
             val response = bffApi.getHome()
 
-            // Update degraded signal BEFORE Room persist (transient — not stored)
+            // 1. Update transient degraded signal BEFORE Room persist.
             _degraded.value = response.degraded
 
-            val domainData = response.toDomain()
+            val now = System.currentTimeMillis()
 
-            // TODO: persist to Room — requires injected DAOs
-            // homeDao.upsert(domainData.toRoomEntity())
-            // ratesDao.upsertAll(...)
-            // alertsDao.upsertAll(...)
-            preferenceStore.setLastRefreshed(System.currentTimeMillis())
+            // 2. Persist ALL fields to Room — INVARIANT.
+            rateDao.upsertRate(response.rates.toEntity(cachedAt = now))
+            alertDao.upsertAll(
+                response.alerts?.map { dto ->
+                    // BFF AlertResponseDto lacks cityId/threshold; use cityId from arg and
+                    // 0f sentinel — full data is persisted via GET /alerts in AlertsRepository.
+                    com.mahaswarna.local.entity.AlertEntity(
+                        id        = dto.id,
+                        cityId    = cityId,
+                        metal     = dto.metal,
+                        direction = dto.direction,
+                        threshold = dto.targetPrice.toFloat(),
+                        active    = dto.active,
+                        createdAt = "",
+                    )
+                } ?: emptyList()
+            )
+            homeDao.upsert(response.toEntity(cachedAt = now))
+            preferenceStore.setLastRefreshed(now)
 
-            _homeData.value = domainData
         }.onFailure {
-            // Keep last cached data; _degraded not updated (retains last known value)
+            // Keep last cached data; degradedFlow retains last known value.
+            // Error is intentionally swallowed here — HomeViewModel renders from Room cache.
         }
-    }
-
-    /**
-     * Returns cached HomeData from Room on cold start.
-     * Returns null on first install (Room empty).
-     */
-    fun getCachedHome(): Flow<HomeData?> {
-        // Full implementation: homeDao.observeLatest().map { it?.toDomain() }
-        // Stub: return in-memory flow
-        return _homeData
     }
 
     /**
      * Apply a live rate update pushed via WebSocket.
-     * Does NOT call BFF — WS is the authoritative live source.
-     * Updates Room so the next cold start gets the WS rate.
+     * Persists directly to Room so the next cold start gets the WS rate.
+     * Does NOT update [degradedFlow] — WS is the live authoritative source.
      */
-    fun applyWsRateUpdate(rate: RateInfo) {
-        val current = _homeData.value
-        if (current != null) {
-            _homeData.value = current.copy(rate = rate)
-            // TODO: persist: ratesDao.upsert(rate.toRoomEntity())
-        }
+    suspend fun applyWsRateUpdate(rate: RateInfo) {
+        val entity = com.mahaswarna.local.entity.RateEntity(
+            cityId      = rate.cityId,
+            gold        = rate.gold,
+            silver      = rate.silver,
+            source      = rate.source,
+            generatedAt = rate.generatedAt,
+            isStale     = rate.isStale,
+            cachedAt    = System.currentTimeMillis(),
+        )
+        rateDao.upsertRate(entity)
     }
 
-    // ── Converters ────────────────────────────────────────────────────────────
+    /**
+     * Rate history for the Vico chart in [RateHistoryScreen].
+     * Populated by REST; WS does not back-fill history.
+     */
+    fun getRateHistory(cityId: String): Flow<List<RateInfo>> =
+        rateDao.getHistory(cityId).map { list -> list.map { it.toDomain() } }
 
-    private fun HomeResponse.toDomain(): HomeData = HomeData(
-        rate = RateInfo(
-            cityId      = rates.cityId,
-            gold        = rates.gold,
-            silver      = rates.silver,
-            source      = rates.source,
-            generatedAt = rates.generatedAt,
-            isStale     = rates.stale,
-        ),
-        alerts = alerts?.map { it.toAlertDomain() } ?: emptyList(),
-    )
-
-    private fun AlertResponseDto.toAlertDomain() =
-        com.mahaswarna.feature.alerts.domain.Alert(
-            id          = id,
-            metal       = metal,
-            targetPrice = targetPrice,
-            direction   = direction,
-            active      = active,
-        )
-}
-
-// Extension stored in PreferenceStore patch
-private fun PreferenceStore.setLastRefreshed(time: Long) {
-    // PATCH: add setLastRefreshed(Long) / getLastRefreshed(): Long to PreferenceStore.kt
-    // Uses a longPreferencesKey("last_refreshed_at")
+    /**
+     * Clears the transient degraded signal (e.g. on WS reconnection when BFF response
+     * with degraded=false has not yet arrived).
+     */
+    fun clearDegraded() {
+        _degraded.value = false
+    }
 }
