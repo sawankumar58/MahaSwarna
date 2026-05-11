@@ -21,6 +21,13 @@ func NewEvaluateThresholdsUseCase(a *infrastructure.AlertsRepository, r *infrast
 	return &EvaluateThresholdsUseCase{alerts: a, rates: r, deliver: d, rdb: rdb}
 }
 
+// ActivePairs returns every distinct (city_id, metal) pair that has at least one
+// pending alert. AlertThresholdJob calls this to drive its evaluation loop so it
+// never relies on a hardcoded city list.
+func (uc *EvaluateThresholdsUseCase) ActivePairs(ctx context.Context) ([]infrastructure.CityMetalPair, error) {
+	return uc.alerts.ListActiveCityMetalPairs(ctx)
+}
+
 func (uc *EvaluateThresholdsUseCase) Evaluate(ctx context.Context, cityID, metal string) error {
 	snap, err := uc.rates.GetLatestRate(ctx, cityID)
 	if err != nil { return nil }

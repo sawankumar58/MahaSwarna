@@ -43,6 +43,36 @@ func (r *AlertsRepository) MarkDelivered(ctx context.Context, id uuid.UUID) erro
 	return err
 }
 
+// CityMetalPair is a distinct (city_id, metal) combination that has at least one
+// pending (undelivered) alert. Used by AlertThresholdJob to drive evaluation without
+// a hardcoded city list.
+type CityMetalPair struct {
+	CityID string
+	Metal  string
+}
+
+// ListActiveCityMetalPairs returns every distinct (city_id, metal) pair that has at
+// least one alert with delivered_at IS NULL. The job calls this once per minute and
+// then evaluates each pair — ensuring all 61 supported cities are covered.
+func (r *AlertsRepository) ListActiveCityMetalPairs(ctx context.Context) ([]CityMetalPair, error) {
+	rows, err := r.db.Query(ctx,
+		`SELECT DISTINCT city_id, metal FROM alerts WHERE delivered_at IS NULL ORDER BY city_id, metal`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var pairs []CityMetalPair
+	for rows.Next() {
+		var p CityMetalPair
+		if err := rows.Scan(&p.CityID, &p.Metal); err != nil {
+			return nil, err
+		}
+		pairs = append(pairs, p)
+	}
+	return pairs, rows.Err()
+}
+
 func (r *AlertsRepository) Delete(ctx context.Context, id, userID uuid.UUID) error {
 	tag, err := r.db.Exec(ctx, `DELETE FROM alerts WHERE id=$1 AND user_id=$2`, id, userID)
 	if err != nil { return err }
