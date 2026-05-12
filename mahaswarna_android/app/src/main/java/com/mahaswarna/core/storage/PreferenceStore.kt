@@ -123,4 +123,24 @@ class PreferenceStore @Inject constructor(
         context.dataStore.data.first()[LAST_REFRESHED] ?: 0L
     }
 
+    // ── Selected City ─────────────────────────────────────────────────────────
+    // Stores the user's selected city slug (e.g. "mumbai").
+    // Set during login (city picker) and on city change in RatesDashboardScreen.
+    // Default: "mumbai" (ApiConstants.DEFAULT_CITY.id).
+    // Not sensitive — DataStore (not EncryptedSharedPreferences) is correct here.
+
+    private val SELECTED_CITY_ID = stringPreferencesKey("selected_city_id")
+
+    fun setSelectedCityId(cityId: String) = runBlocking {
+        context.dataStore.edit { it[SELECTED_CITY_ID] = cityId }
+    }
+
+    fun getSelectedCityId(): String = runBlocking {
+        context.dataStore.data.first()[SELECTED_CITY_ID] ?: "mumbai"
+    }
+
+    fun getSelectedCityIdFlow(): Flow<String> = context.dataStore.data.map { prefs ->
+        prefs[SELECTED_CITY_ID] ?: "mumbai"
+    }
+
 }

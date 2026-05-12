@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -23,6 +24,9 @@ import javax.inject.Singleton
  *
  * Source priority: WS push > REST pull > Room cache.
  *
+ * cityId is sourced from [PreferenceStore.getSelectedCityId] internally — callers never
+ * pass it. This is set at login (CityPicker) and updated in RatesDashboardScreen.
+ *
  * INVARIANT: after every BFF fetch, ALL fields are persisted to Room:
  *   homeDao.upsert(response.toEntity())
  *   rateDao.upsertRate(response.rates.toEntity())
@@ -31,6 +35,9 @@ import javax.inject.Singleton
  *
  * [degradedFlow]: transient — NOT persisted to Room.
  * Resets on next non-degraded BFF response.
+ *
+ * [homeDataFlow]: hot StateFlow combining Room cache for the current city.
+ * Backed by [getCachedHome]; HomeViewModel collects this directly.
  */
 @Singleton
 class HomeRepository @Inject constructor(
@@ -44,36 +51,50 @@ class HomeRepository @Inject constructor(
     private val _degraded = MutableStateFlow(false)
     val degradedFlow: StateFlow<Boolean> = _degraded.asStateFlow()
 
-    // ── Composed home data from Room ──────────────────────────────────────────
+    // ── homeDataFlow — hot StateFlow from Room for the current city ───────────
 
     /**
-     * Reactive stream combining the latest cached rate (for the user's selected city)
+     * Reactive stream combining the latest cached rate (for the user's stored city)
      * and cached alerts into a [HomeData] domain object.
      *
      * Emits null until Room is populated (first install or post-logout wipe).
-     * Use [refresh] to trigger a BFF fetch; Room emission drives recomposition automatically.
+     * Automatically re-emits when [PreferenceStore.selectedCityId] changes.
      */
-    fun getCachedHome(cityId: String): Flow<HomeData?> =
-        combine(
-            rateDao.getLatest(cityId),
-            homeDao.observe(),
-        ) { rateEntity, homeEntity ->
-            if (rateEntity == null) return@combine null
-            HomeData(
-                rate   = rateEntity.toDomain(),
-                alerts = homeEntity?.toAlertList() ?: emptyList(),
-            )
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    val homeDataFlow: Flow<HomeData?> = preferenceStore.getSelectedCityIdFlow()
+        .flatMapLatest { cityId ->
+            combine(
+                rateDao.getLatest(cityId),
+                homeDao.observe(),
+            ) { rateEntity, homeEntity ->
+                if (rateEntity == null) null
+                else HomeData(
+                    rate   = rateEntity.toDomain(),
+                    alerts = homeEntity?.toAlertList() ?: emptyList(),
+                )
+            }
         }
+
+    // ── getCachedHome — same as homeDataFlow, for GetHomeDataUseCase ──────────
+
+    /**
+     * Returns the same reactive stream as [homeDataFlow].
+     * Kept as a named function for callers (use cases) that prefer explicit method calls.
+     */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    fun getCachedHome(): Flow<HomeData?> = homeDataFlow
+
+    // ── refresh — fetches BFF and persists to Room ────────────────────────────
 
     /**
      * Fetch fresh home data from BFF REST.
      * Persists ALL fields to Room. Updates [degradedFlow].
+     * cityId is sourced from [PreferenceStore.getSelectedCityId].
      *
      * On failure: silently keeps last cached data; [degradedFlow] retains last value.
-     * Callers (HomeViewModel) collect [getCachedHome] reactively — Room emission propagates
-     * the update automatically without inspecting this function's return value.
      */
-    suspend fun refresh(cityId: String) {
+    suspend fun refresh() {
+        val cityId = preferenceStore.getSelectedCityId()
         runCatching {
             val response = bffApi.getHome()
 
@@ -86,8 +107,8 @@ class HomeRepository @Inject constructor(
             rateDao.upsertRate(response.rates.toEntity(cachedAt = now))
             alertDao.upsertAll(
                 response.alerts?.map { dto ->
-                    // BFF AlertResponseDto lacks cityId/threshold; use cityId from arg and
-                    // 0f sentinel — full data is persisted via GET /alerts in AlertsRepository.
+                    // BFF AlertResponseDto lacks cityId/threshold; use stored cityId and
+                    // targetPrice.toFloat() — full data persisted via GET /alerts.
                     com.mahaswarna.local.entity.AlertEntity(
                         id        = dto.id,
                         cityId    = cityId,
@@ -104,14 +125,15 @@ class HomeRepository @Inject constructor(
 
         }.onFailure {
             // Keep last cached data; degradedFlow retains last known value.
-            // Error is intentionally swallowed here — HomeViewModel renders from Room cache.
+            // Error is intentionally swallowed — HomeViewModel renders from Room cache.
         }
     }
+
+    // ── WS rate update ────────────────────────────────────────────────────────
 
     /**
      * Apply a live rate update pushed via WebSocket.
      * Persists directly to Room so the next cold start gets the WS rate.
-     * Does NOT update [degradedFlow] — WS is the live authoritative source.
      */
     suspend fun applyWsRateUpdate(rate: RateInfo) {
         val entity = com.mahaswarna.local.entity.RateEntity(
