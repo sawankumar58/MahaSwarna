@@ -1,16 +1,50 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Permits cleartext to 10.0.2.2 for debug builds only -->
+<!--
+  Network Security Config — MahaSwarna
+
+  FIX: The original file placed a <domain> element inside <debug-overrides>.
+  That is not a valid NSC construct — <debug-overrides> only accepts <trust-anchors>.
+  The <domain> element was silently ignored, so cleartext to 10.0.2.2 was NOT
+  actually permitted; the comment was misleading.
+
+  Correct approach: use a top-level <domain-config> with cleartextTrafficPermitted="true"
+  scoped to 10.0.2.2. This host is only reachable on the emulator, so there is no
+  production impact.
+
+  Production behaviour (unchanged):
+    - All cleartext blocked via base-config.
+    - Only system CAs trusted.
+
+  Debug behaviour (fixed):
+    - User CAs trusted (Charles / mitmproxy).
+    - Cleartext to 10.0.2.2 (emulator loopback) permitted.
+    - Cleartext to all other hosts still blocked.
+-->
 <network-security-config>
+
     <debug-overrides>
+        <!-- Trust user-installed CAs (proxy certs) in debug builds only -->
         <trust-anchors>
             <certificates src="user" />
         </trust-anchors>
-        <domain includeSubdomains="true">10.0.2.2</domain>
     </debug-overrides>
+
+    <!--
+      Allow cleartext ONLY to the emulator loopback host.
+      10.0.2.2 is not routable on physical devices, so this has no production impact.
+      A <domain-config> here is standards-compliant NSC; the domain element inside
+      debug-overrides in the original file was silently ignored by the parser.
+    -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">10.0.2.2</domain>
+    </domain-config>
+
+    <!-- Production: no cleartext, system CAs only -->
     <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>
     </base-config>
+
 </network-security-config>
 

@@ -1,18 +1,57 @@
 name: Release
+
+# Triggers on any v* tag push (e.g. v1.0.0, v1.0.1-rc1)
 on:
   push:
     tags: ['v*']
+
 jobs:
   release:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
-      - name: Bundle
+
+      # FIX: missing from original release.yml — present in ci.yml. Without this,
+      # every release build re-downloads the Gradle distribution and all dependency
+      # caches from scratch, adding ~3–5 min to every release build.
+      - uses: gradle/actions/setup-gradle@v4
+
+      # FIX: Hard deployment blocker — google-services.json is gitignored but the
+      # google-services Gradle plugin fails the build immediately without it:
+      #   "File google-services.json is missing from module root folder."
+      # Setup: add GOOGLE_SERVICES_JSON secret in GitHub repo → Settings → Secrets → Actions.
+      - name: Inject google-services.json
+        run: echo '${{ secrets.GOOGLE_SERVICES_JSON }}' > app/google-services.json
+
+      # FIX: Inject Sentry DSN so production crashes are captured.
+      # build.gradle.kts declares buildConfigField("String", "SENTRY_DSN", "\"\"") as
+      # a placeholder for all build types. The real DSN must be injected here.
+      # Setup: add SENTRY_DSN_RELEASE secret in GitHub repo settings.
+      - name: Inject Sentry DSN
+        run: |
+          sed -i 's|buildConfigField("String", "SENTRY_DSN", "\\"\\"")|buildConfigField("String", "SENTRY_DSN", "\\"${{ secrets.SENTRY_DSN_RELEASE }}\\"")| ' app/build.gradle.kts
+
+      # FIX: Original release.yml skipped all quality gates. A crash-on-startup
+      # regression would be uploaded to the internal track undetected.
+      - name: Lint
+        run: ./gradlew ktlintCheck detekt
+
+      - name: Unit Tests
+        run: ./gradlew testReleaseUnitTest
+
+      # Google Play App Signing: bundleRelease without a local signingConfig is valid
+      # when enrolled in Play App Signing. Verify enrollment in Play Console →
+      # Release → Setup → App signing before the first v* tag push.
+      - name: Bundle Release AAB
         run: ./gradlew bundleRelease
+
+      # Required secrets: PLAY_SERVICE_ACCOUNT_JSON, GOOGLE_SERVICES_JSON, SENTRY_DSN_RELEASE
       - name: Upload to Play Store
         uses: r0adkll/upload-google-play@v1
         with:
@@ -20,4 +59,5 @@ jobs:
           packageName: com.mahaswarna
           releaseFiles: app/build/outputs/bundle/release/*.aab
           track: internal
-
+          # Promote manually from internal → production in Play Console after
+          # smoke-testing. Never auto-promote to production.

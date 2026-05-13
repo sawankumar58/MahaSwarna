@@ -2,6 +2,8 @@ package com.mahaswarna.feature.auth.ui
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.google.android.play.core.integrity.IntegrityManagerFactory
+import com.google.android.play.core.integrity.IntegrityTokenRequest
 import com.google.firebase.FirebaseException
 import com.google.firebase.FirebaseNetworkException
 import com.google.firebase.auth.FirebaseAuth
@@ -11,7 +13,6 @@ import com.google.firebase.auth.PhoneAuthOptions
 import com.google.firebase.auth.PhoneAuthProvider
 import com.mahaswarna.core.network.ApiConstants
 import com.mahaswarna.feature.auth.data.AuthRepository
-import com.mahaswarna.feature.billing.integrity.PlayIntegrityVerifier
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -38,35 +39,31 @@ sealed class LoginState {
 /**
  * OTP login ViewModel.
  *
- * FIX (deployment blocker — Play Integrity nonce):
- *   The original code used an inline integrity call with:
- *       IntegrityTokenRequest.builder().setNonce("mahaswarna-${System.currentTimeMillis()}")
- *   This is a plain ASCII timestamp — not base64-encoded.
- *   Play Integrity requires nonces to be base64url-encoded, 16–500 bytes.
- *   Result: IntegrityServiceException: NONCE_IS_NOT_BASE64 on every login attempt,
- *   breaking login for all users on first install.
- *
- *   Fix: inject PlayIntegrityVerifier (already @Singleton, already used correctly
- *   by the billing path). Call generateNonce() for a SecureRandom 32-byte base64url
- *   nonce, then pass it to requestToken(nonce). Eliminates duplicate logic too.
- *
  * Flow (Firebase path):
- *   1. User enters phone → sendOtp(phone, activity)
+ *   1. User enters phone → sendOtp(phone)
  *   2. State → SendingOtp
  *   3. Play Integrity token obtained, POST /auth/send-otp called
- *   4. If response.provider == "firebase": startFirebaseVerification() → State → OtpEntry(Firebase)
- *   5. Auto-verify: onVerificationCompleted() → loginWithFirebase()
+ *   4. If response.provider == "firebase":
+ *      startFirebaseVerification() → Firebase SMS triggers
+ *      State → OtpEntry(Firebase)
+ *   5. Auto-verify: onVerificationCompleted() fires immediately → loginWithFirebase()
  *      Manual: user enters code → verifyFirebaseOtp()
  *
  * Flow (MSG91 path — fallback for network failures):
- *   State → OtpEntry(Msg91) → user enters code → verifyMsg91Otp()
+ *   1. sendOtp() → response.provider == "msg91" or FirebaseNetworkException triggers switchToMsg91()
+ *   2. State → OtpEntry(Msg91)
+ *   3. User enters code → verifyMsg91Otp()
  *
- * FirebaseTooManyRequestsException → Error (never switch to MSG91 — bypasses rate limit).
+ * FirebaseTooManyRequestsException → Error (never switch to MSG91 — would bypass rate limit).
+ *
+ * City selection:
+ *   CityPickerBottomSheet shown on OtpEntry before user taps Verify.
+ *   Exposed via selectedCityId; defaults to "mumbai" if user dismisses.
+ *   cityID is forwarded to every login() call.
  */
 @HiltViewModel
 class LoginViewModel @Inject constructor(
     private val authRepository: AuthRepository,
-    private val playIntegrityVerifier: PlayIntegrityVerifier,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow<LoginState>(LoginState.PhoneEntry)
@@ -81,6 +78,7 @@ class LoginViewModel @Inject constructor(
     private var verificationId: String? = null
     private var phoneNumber: String = ""
 
+    // Firebase auth instance — injected via constructor in production; used directly here for brevity
     private val firebaseAuth: FirebaseAuth get() = FirebaseAuth.getInstance()
 
     // ── Public API ────────────────────────────────────────────────────────────
@@ -91,25 +89,17 @@ class LoginViewModel @Inject constructor(
 
     /**
      * Entry point: user taps "Send OTP".
-     * 1. Obtains Play Integrity token via [PlayIntegrityVerifier].
+     * 1. Obtains Play Integrity token.
      * 2. POST /auth/send-otp.
      * 3. Routes to Firebase or MSG91 path based on response.
-     *
-     * [activity] is kept as a parameter for Firebase PhoneAuthProvider only —
-     * PlayIntegrityVerifier uses @ApplicationContext and does not need an Activity.
      */
     fun sendOtp(phone: String, activity: android.app.Activity) {
         phoneNumber = phone
         _state.value = LoginState.SendingOtp
         viewModelScope.launch {
-            // Step 1 — Play Integrity token.
-            // FIX: generate a SecureRandom base64url nonce via generateNonce(), then
-            // pass it to requestToken(nonce: String). The original code passed a plain
-            // timestamp string directly to IntegrityTokenRequest.setNonce() — not
-            // base64-encoded — causing NONCE_IS_NOT_BASE64 for every login attempt.
+            // Step 1 — Play Integrity token
             val integrityToken = runCatching {
-                val nonce = playIntegrityVerifier.generateNonce()
-                playIntegrityVerifier.requestToken(nonce)
+                obtainIntegrityToken(activity)
             }.getOrElse { e ->
                 _state.value = LoginState.Error("Integrity check failed: ${e.message}")
                 return@launch
@@ -133,7 +123,9 @@ class LoginViewModel @Inject constructor(
         }
     }
 
-    /** MSG91 path: user enters 6-digit code and taps Verify. */
+    /**
+     * MSG91 path: user enters 6-digit code and taps Verify.
+     */
     fun verifyMsg91Otp(otp: String) {
         _state.value = LoginState.Verifying
         viewModelScope.launch {
@@ -159,7 +151,9 @@ class LoginViewModel @Inject constructor(
         }
     }
 
-    /** Firebase path: user manually enters 6-digit SMS code. */
+    /**
+     * Firebase path: user manually enters 6-digit SMS code.
+     */
     fun verifyFirebaseOtp(code: String) {
         val vId = verificationId ?: run {
             _state.value = LoginState.Error("Verification session expired — please resend OTP")
@@ -176,13 +170,13 @@ class LoginViewModel @Inject constructor(
         }
     }
 
-    /** Resend OTP — restarts the whole flow. */
+    /** Resend OTP — restarts the whole flow from sendOtp. */
     fun resendOtp(activity: android.app.Activity) {
         sendOtp(phoneNumber, activity)
     }
 
     /**
-     * Triggered by Firebase SDK when it auto-verifies the number.
+     * Triggered by Firebase SDK when it auto-verifies the number (instant-verify on same device).
      * Called from PhoneAuthProvider callbacks — no UI interaction required.
      */
     internal fun onFirebaseAutoVerified(credential: PhoneAuthCredential) {
@@ -198,6 +192,7 @@ class LoginViewModel @Inject constructor(
     private fun startFirebaseVerification(phone: String, activity: android.app.Activity) {
         val callbacks = object : PhoneAuthProvider.OnVerificationStateChangedCallbacks() {
             override fun onVerificationCompleted(credential: PhoneAuthCredential) {
+                // Auto-verification (instant verify or Google Play services resolution)
                 onFirebaseAutoVerified(credential)
             }
 
@@ -207,6 +202,7 @@ class LoginViewModel @Inject constructor(
                         // MUST NOT switch to MSG91 — rate limit is an abuse-prevention signal
                         LoginState.Error("Too many attempts — please wait before retrying")
                     is FirebaseNetworkException ->
+                        // Network failure only → switch to MSG91
                         LoginState.OtpEntry(OtpProvider.Msg91).also { switchToMsg91(activity) }
                     else ->
                         LoginState.Error(e.message ?: "Verification failed")
@@ -246,6 +242,16 @@ class LoginViewModel @Inject constructor(
             cityID           = _selectedCityId.value,
         )
         _state.value = LoginState.Success
+    }
+
+    private suspend fun obtainIntegrityToken(activity: android.app.Activity): String {
+        val manager = IntegrityManagerFactory.create(activity)
+        val tokenResponse = manager.requestIntegrityToken(
+            IntegrityTokenRequest.builder()
+                .setNonce("mahaswarna-${System.currentTimeMillis()}")
+                .build()
+        ).await()
+        return tokenResponse.token()
     }
 
     private fun Throwable.isHttpCode(code: Int): Boolean =

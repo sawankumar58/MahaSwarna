@@ -14,23 +14,9 @@ import dagger.hilt.android.HiltAndroidApp
  *             the channel does not exist yet. Channel creation is idempotent.
  *   Step 2 — super.onCreate() → Hilt builds the app component:
  *               NetworkModule  → OkHttpClient with interceptors in required order
- *               DatabaseModule → Room (async open, FK enforcement enabled)
+ *               DatabaseModule → Room (async open)
  *               WsModule       → WsClient singleton (not connected yet)
  *   Step 3 — Firebase auto-init (google-services plugin handles this automatically)
- *   Step 4 — Sentry init (after super so Hilt graph + app context are fully ready)
- *
- * FIX (deployment blocker — Sentry DSN):
- *   The original code referenced BuildConfig.SENTRY_DSN_PLACEHOLDER, which had no
- *   corresponding buildConfigField(...) declaration in build.gradle.kts. This is
- *   a compile error in strict mode, or produces an empty string at runtime, causing
- *   Sentry to silently capture nothing in production — crashes go undetected.
- *
- *   Fix: reference BuildConfig.SENTRY_DSN, which is declared via buildConfigField
- *   in build.gradle.kts for each build type:
- *     debug   → "" (Sentry no-ops; avoids polluting prod project with dev noise)
- *     staging → overridden in CI from SENTRY_DSN_STAGING secret
- *     release → overridden in CI from SENTRY_DSN_RELEASE secret
- *   Sentry gracefully no-ops when DSN is blank.
  *
  * TokenStore is NOT accessed here. On post-reboot cold start, first Keystore TEE
  * access takes 50–200ms on budget devices. Calling it in onCreate() consumes the
@@ -49,15 +35,10 @@ class MahaSwarnApplication : Application() {
         // Step 2 — Hilt + Firebase auto-init
         super.onCreate()
 
-        // Step 3/4 — Sentry (after super so app context is ready)
-        // BuildConfig.SENTRY_DSN is declared per build type in build.gradle.kts.
-        // Sentry silently skips init when DSN is blank — no crash, no noise.
+        // Step 3 — Sentry (after super so app context is ready)
         io.sentry.android.core.SentryAndroid.init(this) { options ->
-            options.dsn = BuildConfig.SENTRY_DSN
+            options.dsn = BuildConfig.SENTRY_DSN_PLACEHOLDER
             options.isEnableAutoSessionTracking = true
-            options.environment = BuildConfig.BUILD_TYPE        // "debug" / "staging" / "release"
-            options.sampleRate = if (BuildConfig.DEBUG) 1.0 else 0.2
-            options.tracesSampleRate = if (BuildConfig.DEBUG) 1.0 else 0.05
         }
     }
 }

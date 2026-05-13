@@ -2,7 +2,6 @@ package com.mahaswarna.core.di
 
 import android.content.Context
 import androidx.room.Room
-import androidx.room.RoomDatabase
 import com.mahaswarna.local.AppDatabase
 import com.mahaswarna.local.dao.AlertDao
 import com.mahaswarna.local.dao.BillDao
@@ -27,24 +26,9 @@ object DatabaseModule {
     @Singleton
     fun provideAppDatabase(@ApplicationContext context: Context): AppDatabase =
         Room.databaseBuilder(context, AppDatabase::class.java, "mahaswarna.db")
-            // ── MIGRATION INVARIANT ────────────────────────────────────────
             // NEVER .fallbackToDestructiveMigration()
-            // Diary tables (bills, ledger_entries, customers) are local-only
-            // and unrecoverable. A destructive migration silently destroys a
-            // jeweller's entire transaction history with no recourse.
+            // Diary data is local-only and unrecoverable — see Migrations.kt.
             .addMigrations(Migrations.MIGRATION_1_2)
-            // ── FIX: Foreign key enforcement ──────────────────────────────
-            // SQLite disables PRAGMA foreign_keys by default. Room does NOT
-            // enable it automatically even when @Entity declares ForeignKey.
-            // Without this call, LedgerEntryEntity.onDelete = CASCADE for
-            // customerId is silently ignored — deleting a customer leaves
-            // orphaned ledger_entries permanently in the database.
-            // Room 2.1+ exposes setForeignKeyConstraintsEnabled() for this.
-            .setForeignKeyConstraintsEnabled(true)
-            // ── WAL journal mode ──────────────────────────────────────────
-            // Allows concurrent reads during writes — important for Diary
-            // where the UI reads the ledger while coroutines write new entries.
-            .setJournalMode(RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
             .build()
 
     // ── Session-scoped DAOs ───────────────────────────────────────────────

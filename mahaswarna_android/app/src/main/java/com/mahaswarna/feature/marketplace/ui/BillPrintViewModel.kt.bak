@@ -49,9 +49,12 @@ class BillPrintViewModel @Inject constructor(
 ) : ViewModel() {
 
     /**
-     * Nav args for nullable Double must be read from [SavedStateHandle] via getString
+     * FIX: Nav args for nullable Double must be read from [SavedStateHandle] via getString
      * then parsed — Compose Navigation serializes nullable Doubles as strings in the bundle.
      * Reading via `arguments?.getDouble("goldRate")` returns 0.0 (not null) for absent keys.
+     *
+     * Alternatively Route uses default Double? = null with serializableArg; SavedStateHandle
+     * provides the cleanest access pattern for the VM.
      */
     val goldRate: Double?   = savedStateHandle.get<String>("goldRate")?.toDoubleOrNull()
     val silverRate: Double? = savedStateHandle.get<String>("silverRate")?.toDoubleOrNull()
@@ -131,25 +134,12 @@ class BillPrintViewModel @Inject constructor(
     fun reset() { _uiState.value = BillPrintUiState.Idle }
 
     /**
-     * Writes PDF bytes to the invoices/ subdirectory of cacheDir and returns a
-     * share Intent via FileProvider.
-     *
-     * FIX (runtime crash — deployment blocker):
-     *   The original code wrote to:
-     *       File(context.cacheDir, "invoice_<ts>.pdf")       ← getCacheDir() root
-     *   But file_paths.xml mapped:
-     *       <cache-path name="invoice_pdfs" path="invoices/" />  ← getCacheDir()/invoices/
-     *
-     *   FileProvider.getUriForFile() threw IllegalArgumentException:
-     *       "Failed to find configured root that contains <file>"
-     *   on every share attempt — invoice sharing was completely broken for all users.
-     *
-     *   Fix: write into getCacheDir()/invoices/ to match the FileProvider mapping.
-     *   mkdirs() is called on the parent directory to handle first run after install.
+     * Writes PDF bytes to the app cache dir and returns a share intent.
+     * FileProvider is used so other apps can read the file securely.
+     * Timestamped filename prevents collisions across multiple generations per session.
      */
     private fun buildShareIntent(pdfBytes: ByteArray): Intent {
-        val invoiceDir = File(context.cacheDir, "invoices").also { it.mkdirs() }
-        val file = File(invoiceDir, "invoice_${System.currentTimeMillis()}.pdf")
+        val file = File(context.cacheDir, "invoice_${System.currentTimeMillis()}.pdf")
         file.writeBytes(pdfBytes)
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
         return Intent(Intent.ACTION_SEND).apply {

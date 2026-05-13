@@ -1,6 +1,28 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- FileProvider paths for invoice PDF sharing -->
+<!--
+  FileProvider paths for invoice PDF sharing.
+
+  FIX (runtime crash — deployment blocker):
+  BillPrintViewModel.buildShareIntent() originally wrote to:
+      File(context.cacheDir, "invoice_<timestamp>.pdf")   ← getCacheDir() root
+
+  But this file mapped:
+      <cache-path name="invoice_pdfs" path="invoices/" />   ← getCacheDir()/invoices/
+
+  The mismatch caused FileProvider.getUriForFile() to throw:
+      IllegalArgumentException: Failed to find configured root that contains <file>
+  every time a jeweller tapped Share Invoice — the feature was completely broken.
+
+  Fix: BillPrintViewModel now writes to getCacheDir()/invoices/ to match this mapping.
+  The path="invoices/" entry below is correct and consistent with the fixed VM.
+-->
 <paths>
+    <!--
+      Maps getCacheDir()/invoices/ for invoice PDFs.
+      BillPrintViewModel.buildShareIntent() writes to:
+          File(context.cacheDir, "invoices/invoice_<timestamp>.pdf")
+      The paths must match exactly — mismatch causes IllegalArgumentException at runtime.
+    -->
     <cache-path name="invoice_pdfs" path="invoices/" />
 </paths>
 
