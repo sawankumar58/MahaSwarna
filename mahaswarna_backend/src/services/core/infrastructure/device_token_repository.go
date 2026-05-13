@@ -32,3 +32,13 @@ func (r *DeviceTokenRepository) GetTokensForUser(ctx context.Context, userID uui
 	}
 	return tokens, rows.Err()
 }
+
+// Delete removes a specific FCM token by its token string, scoped to the owning user.
+// Scoping by userID prevents one user from deregistering another user's token.
+// Returns nil if the token did not exist (idempotent).
+func (r *DeviceTokenRepository) Delete(ctx context.Context, userID uuid.UUID, token string) error {
+	_, err := r.db.Exec(ctx,
+		`DELETE FROM device_tokens WHERE user_id=$1 AND token=$2`,
+		userID, token)
+	return err
+}

@@ -3,9 +3,11 @@ package com.mahaswarna.feature.rates.data
 import com.mahaswarna.core.storage.PreferenceStore
 import com.mahaswarna.core.websocket.WsClient
 import com.mahaswarna.core.websocket.WsEnvelope
+import com.mahaswarna.data.mapper.toRoomEntity
 import com.mahaswarna.feature.rates.data.remote.RatesApi
 import com.mahaswarna.feature.rates.domain.Rate
 import com.mahaswarna.feature.rates.domain.RateHistoryPoint
+import com.mahaswarna.local.dao.RateDao
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -36,6 +38,7 @@ class RatesRepository @Inject constructor(
     private val wsClient: WsClient,
     private val json: Json,
     private val preferenceStore: PreferenceStore,
+    private val rateDao: RateDao,
 ) {
     private val _currentRate = MutableStateFlow<Rate?>(null)
     val currentRateFlow: StateFlow<Rate?> = _currentRate.asStateFlow()
@@ -54,7 +57,7 @@ class RatesRepository @Inject constructor(
                 val payload = json.decodeFromJsonElement<WsRatePayload>(envelope.payload)
                 payload.toDomain().also { rate ->
                     _currentRate.value = rate
-                    // TODO: persist to Room ratesDao.upsert(rate.toRoomEntity())
+                    rateDao.upsertRate(rate.toRoomEntity())
                 }
             }
 
@@ -68,7 +71,7 @@ class RatesRepository @Inject constructor(
         val dto = ratesApi.getRate(cityId)
         val rate = dto.toDomain()
         _currentRate.value = rate
-        // TODO: persist to Room
+        rateDao.upsertRate(rate.toRoomEntity())
         return rate
     }
 
@@ -79,6 +82,16 @@ class RatesRepository @Inject constructor(
      */
     suspend fun getHistory(cityId: String): List<RateHistoryPoint> =
         ratesApi.getRateHistory(cityId).map { it.toDomain() }
+
+    // ── Room cache read ───────────────────────────────────────────────────────
+
+    /**
+     * Observe the latest cached rate for a city from Room.
+     * Emits immediately on subscription (cold-start path — ≤400ms target).
+     * Returns null if no cached value exists yet.
+     */
+    fun cachedRateFlow(cityId: String): Flow<Rate?> =
+        rateDao.getLatest(cityId).map { entity -> entity?.toDomain() }
 
     // ── Converters ────────────────────────────────────────────────────────────
 
@@ -107,6 +120,15 @@ class RatesRepository @Inject constructor(
         source      = source,
         generatedAt = generatedAt,
         isStale     = stale,
+    )
+
+    private fun com.mahaswarna.local.entity.RateEntity.toDomain() = Rate(
+        cityId      = cityId,
+        gold        = gold,
+        silver      = silver,
+        source      = source,
+        generatedAt = generatedAt,
+        isStale     = isStale,
     )
 }
 

@@ -1,1 +1,117 @@
-# TODO: SLO alert rules
+# SLO alert rules for MahaSwarna.
+#
+# SLO targets (from ARCHITECTURE.md / RUNBOOK.md):
+#   p95 latency (rates endpoints): < 500ms
+#   p99 latency (rates endpoints): < 2,000ms
+#   p99 WS fanout latency:         < 200ms
+#   Gateway 5xx error rate:        < 0.1% (SLO), alert fires at > 0.5% sustained
+#
+# Severity mapping:
+#   sev1 → PagerDuty critical  (complete outage / data loss / security breach)
+#   sev2 → PagerDuty warning   (significant degradation > 10% users or revenue)
+#   sev3 → Slack #prod-warnings (minor degradation, no immediate user impact)
+
+groups:
+  - name: slo.latency
+    interval: 30s
+    rules:
+
+      # p95 latency > 500ms for 5 consecutive minutes → SEV-2
+      # Covers all services; label by service for triage.
+      - alert: HighP95Latency
+        expr: |
+          histogram_quantile(0.95,
+            sum by (service, le) (
+              rate(http_request_duration_seconds_bucket[5m])
+            )
+          ) > 0.5
+        for: 5m
+        labels:
+          severity: sev2
+        annotations:
+          summary: "p95 latency > 500ms on {{ $labels.service }}"
+          description: >
+            Service {{ $labels.service }} p95 latency is {{ $value | humanizeDuration }},
+            exceeding the 500ms SLO target. Investigate upstream Gemini latency, DB pool
+            starvation, or Redis contention first.
+
+      # p99 latency > 2,000ms for 5 consecutive minutes → SEV-2
+      - alert: HighP99Latency
+        expr: |
+          histogram_quantile(0.99,
+            sum by (service, le) (
+              rate(http_request_duration_seconds_bucket[5m])
+            )
+          ) > 2.0
+        for: 5m
+        labels:
+          severity: sev2
+        annotations:
+          summary: "p99 latency > 2s on {{ $labels.service }}"
+          description: >
+            Service {{ $labels.service }} p99 latency is {{ $value | humanizeDuration }}.
+            Tail-latency SLO breach. Check for hot DB queries or Gemini timeout cascades.
+
+  - name: slo.errors
+    interval: 30s
+    rules:
+
+      # 5xx error rate > 0.5% sustained for 2 minutes → SEV-1
+      # Gap vs SLO target (0.1%) is intentional — filters transient upstream hiccups.
+      # 0.1%–0.5% range appears in Grafana SLO burn dashboard as SEV-3 investigation.
+      - alert: HighErrorRate
+        expr: |
+          sum by (service) (
+            rate(http_requests_total{status=~"5.."}[2m])
+          )
+          /
+          sum by (service) (
+            rate(http_requests_total[2m])
+          ) > 0.005
+        for: 2m
+        labels:
+          severity: sev1
+        annotations:
+          summary: "5xx error rate > 0.5% on {{ $labels.service }}"
+          description: >
+            Service {{ $labels.service }} 5xx error rate is {{ $value | humanizePercentage }}
+            (threshold: 0.5%). Immediate investigation required — check Sentry for stack traces
+            and RUNBOOK.md § High Error Rate for triage steps.
+
+      # 5xx error rate 0.1%–0.5% for 5 minutes → SEV-3 (SLO burn, not yet page-worthy)
+      - alert: SLOBurnErrorRate
+        expr: |
+          sum by (service) (
+            rate(http_requests_total{status=~"5.."}[5m])
+          )
+          /
+          sum by (service) (
+            rate(http_requests_total[5m])
+          ) > 0.001
+        for: 5m
+        labels:
+          severity: sev3
+        annotations:
+          summary: "SLO burn: 5xx rate 0.1%–0.5% on {{ $labels.service }}"
+          description: >
+            Service {{ $labels.service }} 5xx rate is {{ $value | humanizePercentage }}.
+            Below alert threshold but consuming SLO budget. Investigate within 4h.
+
+  - name: slo.websocket
+    interval: 30s
+    rules:
+
+      # Active WS connections drop to zero during market hours (Mon–Sat 10:00–19:00 IST)
+      # indicates pricing service outage. UTC equivalent: 04:30–13:30.
+      - alert: WSConnectionsDrained
+        expr: |
+          sum(ws_connections_active{service="pricing"}) == 0
+        for: 2m
+        labels:
+          severity: sev1
+        annotations:
+          summary: "All WebSocket connections lost on pricing service"
+          description: >
+            Pricing service reports zero active WebSocket connections for 2 minutes.
+            Live rate delivery is completely down. Check kill_switch_ws flag and
+            pricing container health. See RUNBOOK.md § Gemini Outage.

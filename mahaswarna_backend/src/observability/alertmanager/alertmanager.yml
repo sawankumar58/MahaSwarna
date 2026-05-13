@@ -1,1 +1,50 @@
-# TODO: see backend architecture alertmanager section
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: pagerduty-critical
+  group_by: [alertname, severity]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - match:
+        severity: sev1
+      receiver: pagerduty-critical
+      repeat_interval: 1h
+    - match:
+        severity: sev2
+      receiver: pagerduty-warning
+      repeat_interval: 4h
+    - match:
+        severity: sev3
+      receiver: pagerduty-warning
+      repeat_interval: 12h
+
+receivers:
+  - name: pagerduty-critical
+    pagerduty_configs:
+      - routing_key: ${PAGERDUTY_KEY}
+        severity: critical
+        description: '{{ .CommonAnnotations.summary }}'
+        details:
+          firing: '{{ .Alerts.Firing | len }}'
+          alertname: '{{ .CommonLabels.alertname }}'
+
+  - name: pagerduty-warning
+    pagerduty_configs:
+      - routing_key: ${PAGERDUTY_KEY}
+        severity: warning
+        description: '{{ .CommonAnnotations.summary }}'
+        details:
+          firing: '{{ .Alerts.Firing | len }}'
+          alertname: '{{ .CommonLabels.alertname }}'
+
+inhibit_rules:
+  # Suppress SEV-2 and SEV-3 alerts when a SEV-1 is already firing for the same alertname.
+  # Avoids alert storms where a total outage fires multiple severity levels simultaneously.
+  - source_match:
+      severity: sev1
+    target_match_re:
+      severity: sev2|sev3
+    equal: [alertname]

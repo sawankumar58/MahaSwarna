@@ -77,7 +77,8 @@ func main() {
 	consentUC := application.NewLogConsentUseCase(consentRepo)
 	verifyUC  := application.NewVerifyReceiptUseCase(receiptRepo, subRepo, userRepo, playClient, auditRepo, notifier)
 	restoreUC := application.NewRestoreSubscriptionUseCase(subRepo, playClient)
-	tokenUC   := application.NewRegisterDeviceTokenUseCase(tokenRepo)
+	tokenUC      := application.NewRegisterDeviceTokenUseCase(tokenRepo)
+	deregTokenUC := application.NewDeregisterDeviceTokenUseCase(tokenRepo)
 	deliverUC := application.NewDeliverAlertUseCase(alertsRepo, tokenRepo, fcmClient, auditRepo, notifier)
 	evalUC    := application.NewEvaluateThresholdsUseCase(alertsRepo, rateProj, deliverUC, rdb)
 
@@ -86,7 +87,7 @@ func main() {
 	compH     := corehttp.NewComplianceHandler(deleteUC, consentUC)
 	billingH  := corehttp.NewBillingHandler(verifyUC, restoreUC)
 	alertsH   := corehttp.NewAlertsHandler(alertsRepo)
-	tokenH    := corehttp.NewDeviceTokenHandler(tokenUC)
+	tokenH    := corehttp.NewDeviceTokenHandler(tokenUC, deregTokenUC)
 	flagsH    := corehttp.NewFlagsHandler(flagRepo)
 	internalH := corehttp.NewInternalHandler(subRepo)
 

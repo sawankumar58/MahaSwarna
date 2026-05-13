@@ -118,10 +118,8 @@ func buildRouter(rdb *redis.Client) http.Handler {
 		r.Delete("/v1/user/account", coreProxy.Handle) // DELETE /v1/user/account (compliance deletion)
 
 		// ── Engagement / push notification (core service) ─────────────────
-		r.Post("/v1/engagement/device-token", coreProxy.Handle) // POST — register/update FCM token
-		// TODO(openapi): DELETE /v1/engagement/device-token/{token} is implemented here
-		// but not yet documented in mahaswarna-openapi.yaml. Add before next release.
-		r.Delete("/v1/engagement/device-token/{token}", coreProxy.Handle)
+		r.Post("/v1/engagement/device-token", coreProxy.Handle)            // POST  — register/update FCM token
+		r.Delete("/v1/engagement/device-token/{token}", coreProxy.Handle) // DELETE — deregister FCM token
 
 		// ── Feature flags — read-only snapshot (core service) ─────────────
 		r.Get("/v1/config/feature-flags", coreProxy.Handle)

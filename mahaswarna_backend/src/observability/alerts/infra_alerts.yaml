@@ -1,1 +1,124 @@
-# TODO: infra alert rules
+# Infrastructure alert rules for MahaSwarna.
+#
+# Covers: OOMKill, disk pressure, PostgreSQL replication lag, Redis Sentinel health.
+# All alerts are SEV-2 unless noted (infra issues degrade > 10% of users or pose
+# data-loss risk at financial-data severity).
+#
+# Node/container metrics require node_exporter and cAdvisor sidecars in
+# docker-compose.prod.yml. PostgreSQL metrics require postgres_exporter.
+
+groups:
+  - name: infra.memory
+    rules:
+
+      # Container OOM kill → SEV-2
+      # Any OOMKill is a configuration error at this scale (16 GB RAM, ~6–8 GB expected usage).
+      # Likely cause: Redis without maxmemory policy, or Gemini response buffering spike.
+      - alert: ContainerOOMKilled
+        expr: |
+          increase(container_oom_events_total[5m]) > 0
+        labels:
+          severity: sev2
+        annotations:
+          summary: "OOMKill detected on {{ $labels.container_label_com_docker_compose_service }}"
+          description: >
+            Container {{ $labels.container_label_com_docker_compose_service }} was OOM-killed.
+            Check Redis maxmemory-policy (should be allkeys-lru), Go service memory profiles,
+            and docker-compose.prod.yml memory limits. See ARCHITECTURE.md § Infrastructure Sizing.
+
+  - name: infra.disk
+    rules:
+
+      # Disk usage > 80% → SEV-2
+      # Primary risk: PostgreSQL WAL accumulation and pg_dump backup files.
+      # CPX41 ships with 240 GB SSD; PostgreSQL data + WAL + backups should stay < 180 GB.
+      - alert: DiskUsageHigh
+        expr: |
+          (
+            node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}
+            - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"}
+          )
+          / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"} > 0.80
+        for: 5m
+        labels:
+          severity: sev2
+        annotations:
+          summary: "Disk usage > 80% on {{ $labels.mountpoint }}"
+          description: >
+            Filesystem {{ $labels.mountpoint }} is {{ $value | humanizePercentage }} full.
+            Run cleanup_old_data.sh to purge stale rate snapshots and expired receipts.
+            Verify pg_dump backup files are rotating correctly via backup_postgres.sh.
+
+      # Disk usage > 90% → SEV-1 (imminent write failures)
+      - alert: DiskUsageCritical
+        expr: |
+          (
+            node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}
+            - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"}
+          )
+          / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"} > 0.90
+        for: 1m
+        labels:
+          severity: sev1
+        annotations:
+          summary: "Disk usage > 90% — write failures imminent on {{ $labels.mountpoint }}"
+          description: >
+            Filesystem {{ $labels.mountpoint }} is {{ $value | humanizePercentage }} full.
+            PostgreSQL WAL writes may fail, causing data loss. Immediate action required:
+            delete old backups, run cleanup_old_data.sh, and consider volume expansion.
+
+  - name: infra.database
+    rules:
+
+      # PostgreSQL replication lag > 500ms → SEV-2
+      # Read replica is used by intelligence service for catalog FTS queries.
+      # High lag means catalog search results may be stale.
+      - alert: PostgreSQLReplicationLag
+        expr: |
+          pg_replication_lag_seconds > 0.5
+        for: 5m
+        labels:
+          severity: sev2
+        annotations:
+          summary: "PostgreSQL replication lag > 500ms"
+          description: >
+            Replication lag is {{ $value | humanizeDuration }}. Catalog FTS queries on the
+            read replica may return stale results. Check network between primary and replica,
+            and pg_stat_replication on the primary for slot state.
+
+      # PostgreSQL connection pool approaching saturation → SEV-2
+      # Configured max is 150 (postgresql.conf). Alert at 80% = 120 connections.
+      - alert: PostgreSQLConnectionsHigh
+        expr: |
+          pg_stat_activity_count > 120
+        for: 3m
+        labels:
+          severity: sev2
+        annotations:
+          summary: "PostgreSQL connections approaching max ({{ $value }}/150)"
+          description: >
+            {{ $value }} active connections against a max_connections of 150.
+            Check ARCHITECTURE.md § PostgreSQL Connection Pool. If sustained,
+            increase pricing and intelligence MaxConns by 5 slots each before
+            touching max_connections.
+
+  - name: infra.redis
+    rules:
+
+      # Redis Sentinel loses quorum (fewer than 2 sentinels reachable) → SEV-1
+      # JTI revocation fails open during Redis outage — see RUNBOOK.md § Redis Outage.
+      # This alert fires if the sentinel master count drops, indicating a split-brain or
+      # total Sentinel failure. Requires redis_exporter pointed at each sentinel node.
+      - alert: RedisSentinelQuorumLost
+        expr: |
+          sum(redis_sentinel_master_ok_slaves{master_name="mymaster"}) < 1
+        for: 1m
+        labels:
+          severity: sev1
+        annotations:
+          summary: "Redis Sentinel quorum lost — JTI revocation failing open"
+          description: >
+            Redis Sentinel reports fewer than 1 OK replica for mymaster. JTI revocation
+            is now failing open — logged-out tokens remain valid until expiry (up to 15min).
+            Activate kill_switch_ws and kill_switch_payments immediately per RUNBOOK.md
+            § Redis Outage. Restore sentinel quorum before deactivating kill-switches.

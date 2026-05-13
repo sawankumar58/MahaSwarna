@@ -6,6 +6,7 @@ import com.mahaswarna.feature.home.data.HomeResponse
 import com.mahaswarna.feature.home.data.RateDto
 import com.mahaswarna.feature.home.domain.HomeData
 import com.mahaswarna.feature.home.domain.RateInfo
+import com.mahaswarna.feature.rates.domain.Rate
 import com.mahaswarna.local.entity.AlertEntity
 import com.mahaswarna.local.entity.HomeEntity
 import com.mahaswarna.local.entity.RateEntity
@@ -39,6 +40,21 @@ fun RateEntity.toDomain(): RateInfo = RateInfo(
     source      = source,
     generatedAt = generatedAt,
     isStale     = isStale,
+)
+
+/**
+ * Domain model → Room entity for persistence from WS or REST paths.
+ * [cachedAt] defaults to now; pass an explicit value in tests for determinism.
+ * isStale is preserved verbatim from the backend — never recomputed client-side.
+ */
+fun Rate.toRoomEntity(cachedAt: Long = System.currentTimeMillis()): RateEntity = RateEntity(
+    cityId      = cityId,
+    gold        = gold,
+    silver      = silver,
+    source      = source,
+    generatedAt = generatedAt,
+    isStale     = isStale,
+    cachedAt    = cachedAt,
 )
 
 /** Network DTO → domain model (in-memory path, no Room hop needed). */

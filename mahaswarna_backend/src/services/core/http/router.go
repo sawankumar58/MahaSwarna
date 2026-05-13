@@ -34,7 +34,8 @@ func NewRouter(
 		r.Get("/alerts",                    alerts.ListAlerts)
 		r.Post("/alerts",                   alerts.CreateAlert)
 		r.Delete("/alerts/{id}",            alerts.DeleteAlert)
-		r.Post("/engagement/device-token",  deviceToken.RegisterToken)
+		r.Post("/engagement/device-token",         deviceToken.RegisterToken)
+		r.Delete("/engagement/device-token/{token}", deviceToken.DeregisterToken)
 		r.Get("/flags/public",              flags.GetPublicFlags)
 	})
 

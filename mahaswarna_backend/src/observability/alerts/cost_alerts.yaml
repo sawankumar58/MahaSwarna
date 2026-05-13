@@ -1,1 +1,84 @@
-# TODO: cost alert rules
+# Cost alert rules for MahaSwarna.
+#
+# Gemini API is the sole AI rate source. The scheduler runs hourly for 61 cities
+# during IST market hours (Mon–Sat 10:00–19:00), producing ~9 batches/day × 61 cities
+# = ~549 Gemini calls/day at steady state.
+#
+# Alert thresholds (from ARCHITECTURE.md observability spec):
+#   > $200/day → SEV-3 (investigate; above expected steady-state)
+#   > $500/day → SEV-2 (runaway spend; likely scheduler loop or quota bypass)
+#
+# Implementation note: Gemini spend is not a standard Prometheus metric exposed by
+# the Gemini API itself. The pricing service tracks spend via a custom counter
+# (gemini_api_cost_usd_total) incremented by ai_rate_scheduler_job.go after each
+# successful generation call, using the token counts from the API response and the
+# published Gemini Pro price per token. This is an approximation; reconcile against
+# Google Cloud Billing monthly.
+#
+# If gemini_api_cost_usd_total is not yet instrumented, these rules will produce
+# "no data" rather than false-positive fires — safe to deploy ahead of instrumentation.
+
+groups:
+  - name: cost.gemini
+    rules:
+
+      # Gemini API spend > $200 in a rolling 24h window → SEV-3
+      # Expected steady-state: ~$10–50/day depending on token usage per city.
+      # $200 indicates either the scheduler is looping, retrying excessively,
+      # or a new code path is making unbounded Gemini calls.
+      - alert: GeminiSpendHighDaily
+        expr: |
+          increase(gemini_api_cost_usd_total[24h]) > 200
+        labels:
+          severity: sev3
+        annotations:
+          summary: "Gemini API spend > $200 in last 24h (actual: ${{ $value | printf \"%.2f\" }})"
+          description: >
+            Gemini API cost has exceeded $200 in the last 24 hours. Expected steady-state
+            is $10–50/day. Investigate ai_rate_scheduler_job.go for runaway retry loops,
+            check AiQuotaInterceptor response headers for quota exhaustion signals, and
+            review Google Cloud Billing console. The rate_sanity_threshold_pct feature flag
+            rejection path should absorb anomalous rates without extra Gemini retries —
+            confirm it is not retrying on sanity failures.
+
+      # Gemini API spend > $500 in a rolling 24h window → SEV-2
+      # At this level the monthly bill exceeds the entire VPS infrastructure budget.
+      # Likely cause: scheduler loop not respecting IST market hours, or intelligence
+      # service making unbounded Vision API calls for content moderation.
+      - alert: GeminiSpendCriticalDaily
+        expr: |
+          increase(gemini_api_cost_usd_total[24h]) > 500
+        labels:
+          severity: sev2
+        annotations:
+          summary: "Gemini API spend > $500 in last 24h — runaway cost (actual: ${{ $value | printf \"%.2f\" }})"
+          description: >
+            Gemini API cost has exceeded $500 in the last 24 hours. This exceeds the
+            entire monthly VPS budget in a single day. Immediate action: check
+            ai_rate_scheduler_job.go cron timezone (must be Asia/Kolkata — UTC default
+            fires 5.5h late and may cause double-runs), verify kill_switch_ai flag is
+            functional, and check intelligence/moderation_client.go for unbounded Vision
+            calls. Consider activating kill_switch_ai via feature flags if the source
+            cannot be identified within 30 minutes.
+
+  - name: cost.gemini.quota
+    rules:
+
+      # Gemini quota exhaustion (HTTP 429 from Gemini) spike → SEV-3
+      # A sudden spike in 429s means the scheduler is burning quota faster than the
+      # rate limit allows, and cities will receive stale rates until quota resets.
+      # Requires gemini_api_errors_total counter with status_code label in
+      # ai_rate_scheduler_job.go.
+      - alert: GeminiQuotaExhausted
+        expr: |
+          increase(gemini_api_errors_total{status_code="429"}[10m]) > 5
+        labels:
+          severity: sev3
+        annotations:
+          summary: "Gemini API quota exhaustion: {{ $value }} 429s in last 10 minutes"
+          description: >
+            More than 5 Gemini 429 (quota exceeded) errors in the last 10 minutes.
+            Affected cities will serve stale rates with stale:true until the next
+            successful scheduler run. Check the rate_sanity_threshold_pct flag and
+            confirm the scheduler is not retrying on 429 without backoff. Review
+            Google Cloud quota limits in the GCP console if this is sustained.
