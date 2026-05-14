@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  MahaSwarna dimension tokens.
+
+  These values are consumed by Compose via dimensionResource() and by any
+  legacy XML layouts. Keeping them here rather than hard-coding in Kotlin
+  ensures consistent spacing across the whole app and makes design-token
+  updates a single-file change.
+
+  Naming convention:
+    spacing_*   — layout padding / margin / gap
+    corner_*    — card / chip / button corner radii
+    icon_*      — standard icon sizes
+    elevation_* — Material3 elevation levels
+    chart_*     — Vico chart-specific sizes
+-->
+<resources>
+
+    <!-- ── Spacing scale (4dp grid) ───────────────────────────────────── -->
+    <dimen name="spacing_2">2dp</dimen>
+    <dimen name="spacing_4">4dp</dimen>
+    <dimen name="spacing_6">6dp</dimen>
+    <dimen name="spacing_8">8dp</dimen>
+    <dimen name="spacing_12">12dp</dimen>
+    <dimen name="spacing_16">16dp</dimen>
+    <dimen name="spacing_20">20dp</dimen>
+    <dimen name="spacing_24">24dp</dimen>
+    <dimen name="spacing_32">32dp</dimen>
+    <dimen name="spacing_40">40dp</dimen>
+    <dimen name="spacing_48">48dp</dimen>
+    <dimen name="spacing_56">56dp</dimen>
+    <dimen name="spacing_64">64dp</dimen>
+
+    <!-- ── Screen horizontal padding ────────────────────────────────── -->
+    <!-- Used as the standard side margin for full-width content areas. -->
+    <dimen name="screen_horizontal_padding">16dp</dimen>
+
+    <!-- ── Corner radii ─────────────────────────────────────────────── -->
+    <!-- Aligned to Material3 shape tokens. -->
+    <dimen name="corner_small">4dp</dimen>
+    <dimen name="corner_medium">8dp</dimen>
+    <dimen name="corner_large">12dp</dimen>
+    <dimen name="corner_extra_large">16dp</dimen>
+    <dimen name="corner_full">50dp</dimen>   <!-- pill / FAB -->
+
+    <!-- ── Card-specific ───────────────────────────────────────────── -->
+    <dimen name="card_corner_radius">12dp</dimen>
+    <dimen name="card_padding_vertical">12dp</dimen>
+    <dimen name="card_padding_horizontal">16dp</dimen>
+    <dimen name="card_elevation">2dp</dimen>
+
+    <!-- ── Icon sizes ─────────────────────────────────────────────── -->
+    <dimen name="icon_small">16dp</dimen>
+    <dimen name="icon_default">24dp</dimen>
+    <dimen name="icon_large">32dp</dimen>
+    <dimen name="icon_xlarge">48dp</dimen>
+
+    <!-- ── Bottom nav / tab bar ──────────────────────────────────── -->
+    <dimen name="bottom_nav_height">64dp</dimen>
+
+    <!-- ── Top bar ──────────────────────────────────────────────── -->
+    <dimen name="top_bar_height">56dp</dimen>
+
+    <!-- ── Rate tile (home screen) ──────────────────────────────── -->
+    <dimen name="rate_tile_height">80dp</dimen>
+    <dimen name="rate_value_text_size">28sp</dimen>
+
+    <!-- ── Chart (Vico) ─────────────────────────────────────────── -->
+    <dimen name="chart_height">180dp</dimen>
+    <dimen name="chart_axis_label_size">10sp</dimen>
+    <dimen name="chart_marker_size">8dp</dimen>
+
+    <!-- ── Shimmer loading placeholder ─────────────────────────── -->
+    <dimen name="shimmer_corner_radius">8dp</dimen>
+
+    <!-- ── Invoice / PDF layout ─────────────────────────────────── -->
+    <dimen name="invoice_page_margin">24dp</dimen>
+    <dimen name="invoice_logo_size">48dp</dimen>
+
+    <!-- ── Elevation ────────────────────────────────────────────── -->
+    <dimen name="elevation_none">0dp</dimen>
+    <dimen name="elevation_low">1dp</dimen>
+    <dimen name="elevation_medium">2dp</dimen>
+    <dimen name="elevation_high">4dp</dimen>
+    <dimen name="elevation_dialog">8dp</dimen>
+
+    <!-- ── Min touch target (Material accessibility guideline: 48dp) -->
+    <dimen name="min_touch_target">48dp</dimen>
+
+    <!-- ── Stale-rate banner ─────────────────────────────────────── -->
+    <dimen name="stale_banner_height">36dp</dimen>
+
+</resources>

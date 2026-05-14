@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  MahaSwarna Material3 theme declarations.
+
+  These values back the Compose MaterialTheme defined in Theme.kt.
+  Required by the Activity in AndroidManifest.xml so the window background
+  and status-bar colour are correct before Compose draws its first frame,
+  preventing a white-flash on cold start.
+
+  android:theme="@style/Theme.MahaSwarna" must be set on <activity> in
+  AndroidManifest.xml.
+
+  Colour tokens come from res/values/colors.xml.
+-->
+<resources>
+
+    <!--
+      Base application theme.
+      Parent = Theme.Material3.DayNight.NoActionBar ensures:
+        - Material3 components render correctly in XML-based views
+        - No ActionBar (Compose TopAppBar is used instead)
+        - Day/Night switching handled at the Compose layer via Theme.kt
+    -->
+    <style name="Theme.MahaSwarna" parent="Theme.Material3.DayNight.NoActionBar">
+
+        <!-- ── Window background ─────────────────────────────────────── -->
+        <!-- Matches the Compose Surface/background colour so there is no
+             colour flash between the window background and first Compose frame. -->
+        <item name="android:windowBackground">@color/background</item>
+
+        <!-- ── Status bar ────────────────────────────────────────────── -->
+        <!-- Transparent: Compose WindowInsets handles padding, Accompanist
+             SystemUiController sets the actual bar colour at runtime. -->
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+
+        <!-- ── Navigation bar ───────────────────────────────────────── -->
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightNavigationBar">false</item>
+
+        <!-- ── Edge-to-edge ──────────────────────────────────────────── -->
+        <!-- Required for WindowCompat.setDecorFitsSystemWindows(window, false)
+             in MainActivity to work correctly on API 24+. -->
+        <item name="android:enforceNavigationBarContrast">false</item>
+        <item name="android:enforceStatusBarContrast">false</item>
+
+        <!-- ── Splash screen (API 31+) ──────────────────────────────── -->
+        <!-- windowSplashScreenBackground must be opaque — transparent is not
+             valid for the splash window. Matches the dark brand background. -->
+        <item name="android:windowSplashScreenBackground">@color/splash_background</item>
+
+    </style>
+
+    <!--
+      Splash screen theme (used only for SplashActivity / core:splashscreen).
+      Set on the <activity> that hosts the splash in AndroidManifest.xml,
+      or use the androidx.core:core-splashscreen API to install it programmatically.
+      Keeping it separate avoids polluting the main activity theme.
+    -->
+    <style name="Theme.MahaSwarna.Splash" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/splash_background</item>
+        <!-- postSplashScreenTheme tells the splash API which theme to switch to. -->
+        <item name="postSplashScreenTheme">@style/Theme.MahaSwarna</item>
+    </style>
+
+</resources>
