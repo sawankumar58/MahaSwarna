@@ -1,0 +1,135 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build type'
+        required: true
+        default: 'debug'
+        type: choice
+        options:
+          - debug
+          - staging
+          - release
+
+jobs:
+  build:
+    name: Build ${{ github.event.inputs.build_type || 'debug' }} APK
+    runs-on: ubuntu-latest
+
+    env:
+      BUILD_TYPE: ${{ github.event.inputs.build_type || 'debug' }}
+
+    steps:
+      # ── 1. Checkout ────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Java 17 (matches compileOptions in build.gradle.kts) ───────────
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      # ── 3. Gradle cache (speeds up dependency downloads) ──────────────────
+      - name: Cache Gradle & KSP outputs
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ${{ github.workspace }}/mahaswarna_android/.gradle
+            ${{ github.workspace }}/mahaswarna_android/build
+            ${{ github.workspace }}/mahaswarna_android/app/build/generated
+          key: gradle-${{ runner.os }}-${{ hashFiles('mahaswarna_android/gradle/libs.versions.toml', 'mahaswarna_android/**/*.gradle.kts') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      # ── 4. google-services.json (required for Firebase BOM 34) ────────────
+      #   Store the full JSON content as a repo secret: GOOGLE_SERVICES_JSON
+      - name: Write google-services.json
+        run: |
+          echo '${{ secrets.GOOGLE_SERVICES_JSON }}' \
+            > mahaswarna_android/app/google-services.json
+
+      # ── 5. Keystore for release / staging signing ──────────────────────────
+      #   Secrets needed (only for release/staging):
+      #     KEYSTORE_BASE64       – base64-encoded .jks / .keystore file
+      #     KEY_ALIAS             – key alias inside the keystore
+      #     KEY_PASSWORD          – key password
+      #     STORE_PASSWORD        – keystore password
+      - name: Decode keystore
+        if: env.BUILD_TYPE != 'debug'
+        run: |
+          echo '${{ secrets.KEYSTORE_BASE64 }}' | base64 --decode \
+            > mahaswarna_android/app/mahaswarna.keystore
+
+      # ── 6. Inject signing config into gradle.properties for release ────────
+      - name: Inject signing properties
+        if: env.BUILD_TYPE != 'debug'
+        run: |
+          cat >> mahaswarna_android/gradle.properties <<EOF
+          MAHASWARNA_KEYSTORE_PATH=app/mahaswarna.keystore
+          MAHASWARNA_KEY_ALIAS=${{ secrets.KEY_ALIAS }}
+          MAHASWARNA_KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}
+          MAHASWARNA_STORE_PASSWORD=${{ secrets.STORE_PASSWORD }}
+          EOF
+
+      # ── 7. Inject Sentry DSN ───────────────────────────────────────────────
+      #   Secrets: SENTRY_DSN_STAGING, SENTRY_DSN_RELEASE
+      - name: Inject Sentry DSN (staging)
+        if: env.BUILD_TYPE == 'staging'
+        run: |
+          sed -i 's|buildConfigField("String", "SENTRY_DSN", "\\"\\"")|buildConfigField("String", "SENTRY_DSN", "\\"${{ secrets.SENTRY_DSN_STAGING }}\\"")|g' \
+            mahaswarna_android/app/build.gradle.kts
+
+      - name: Inject Sentry DSN (release)
+        if: env.BUILD_TYPE == 'release'
+        run: |
+          sed -i 's|buildConfigField("String", "SENTRY_DSN", "\\"\\"")|buildConfigField("String", "SENTRY_DSN", "\\"${{ secrets.SENTRY_DSN_RELEASE }}\\"")|g' \
+            mahaswarna_android/app/build.gradle.kts
+
+      # ── 8. Make gradlew executable ─────────────────────────────────────────
+      - name: Grant Gradle wrapper execute permission
+        run: chmod +x mahaswarna_android/gradlew
+
+      # ── 9. Build APK ───────────────────────────────────────────────────────
+      - name: Build debug APK
+        if: env.BUILD_TYPE == 'debug'
+        working-directory: mahaswarna_android
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Build staging APK
+        if: env.BUILD_TYPE == 'staging'
+        working-directory: mahaswarna_android
+        run: ./gradlew assembleStaging --no-daemon --stacktrace
+
+      - name: Build release APK
+        if: env.BUILD_TYPE == 'release'
+        working-directory: mahaswarna_android
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+
+      # ── 10. Locate the built APK ───────────────────────────────────────────
+      - name: Find APK path
+        id: apk_path
+        run: |
+          APK=$(find mahaswarna_android/app/build/outputs/apk \
+                  -name "*.apk" | head -1)
+          echo "path=$APK" >> $GITHUB_OUTPUT
+          echo "Found APK: $APK"
+
+      # ── 11. Upload APK as artifact ─────────────────────────────────────────
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: MahaSwarna-${{ env.BUILD_TYPE }}-${{ github.run_number }}
+          path: ${{ steps.apk_path.outputs.path }}
+          retention-days: 14
+          if-no-files-found: error
