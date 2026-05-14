@@ -134,18 +134,11 @@ class BillPrintViewModel @Inject constructor(
      * Writes PDF bytes to the invoices/ subdirectory of cacheDir and returns a
      * share Intent via FileProvider.
      *
-     * FIX (runtime crash — deployment blocker):
-     *   The original code wrote to:
-     *       File(context.cacheDir, "invoice_<ts>.pdf")       ← getCacheDir() root
-     *   But file_paths.xml mapped:
-     *       <cache-path name="invoice_pdfs" path="invoices/" />  ← getCacheDir()/invoices/
+     * The file is written to getCacheDir()/invoices/ to match the FileProvider
+     * mapping in file_paths.xml:
+     *   <cache-path name="invoice_pdfs" path="invoices/" />
      *
-     *   FileProvider.getUriForFile() threw IllegalArgumentException:
-     *       "Failed to find configured root that contains <file>"
-     *   on every share attempt — invoice sharing was completely broken for all users.
-     *
-     *   Fix: write into getCacheDir()/invoices/ to match the FileProvider mapping.
-     *   mkdirs() is called on the parent directory to handle first run after install.
+     * mkdirs() is called on the parent directory to handle first run after install.
      */
     private fun buildShareIntent(pdfBytes: ByteArray): Intent {
         val invoiceDir = File(context.cacheDir, "invoices").also { it.mkdirs() }

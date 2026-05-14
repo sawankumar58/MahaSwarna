@@ -51,11 +51,7 @@ class DiaryViewModel @Inject constructor(
 
     // ── Customers with net balances ───────────────────────────────────────────
     //
-    // FIX: previous version had a broken .let{} chain that:
-    //   (a) double-evaluated stateIn with wrong generic type (Pair vs CustomerWithBalance)
-    //   (b) created a second MutableStateFlow sink inside a .let on an already-stateIn'd flow
-    //
-    // Correct pattern: flatMapLatest → emit List<Pair>, map to CustomerWithBalance, stateIn once.
+    // flatMapLatest → emit List<Pair>, map to CustomerWithBalance, stateIn once.
 
     val customersWithBalance: StateFlow<List<CustomerWithBalance>> =
         _searchQuery
@@ -103,9 +99,9 @@ class DiaryViewModel @Inject constructor(
 
     /**
      * Upserts a customer.
-     * FIX: on edit (id != null), [createdAt] MUST be fetched from the existing entity,
-     * not set to 0L (which incorrectly moves the record to epoch 0 in the timeline).
-     * If the existing entity cannot be found (race condition), [System.currentTimeMillis()] is used.
+     * On edit (id != null), [createdAt] is fetched from the existing entity to preserve
+     * the original creation timestamp. Falls back to [System.currentTimeMillis()] if the
+     * entity is not found (race condition).
      */
     fun saveCustomer(
         id: String? = null,
@@ -130,7 +126,7 @@ class DiaryViewModel @Inject constructor(
                     address   = address.trim(),
                     gstNumber = gstNumber.trim().uppercase(),
                     notes     = notes.trim(),
-                    createdAt = existingCreatedAt,  // FIX: was 0L on edit path
+                    createdAt = existingCreatedAt,
                     updatedAt = now,
                 )
                 repository.upsertCustomer(customer)

@@ -2,31 +2,13 @@ package middleware
 
 import (
 	"net/http"
-	"strconv"
 
-	"github.com/mahaswarna/shared"
+	sharedmw "github.com/mahaswarna/shared/middleware"
 )
 
-// ServiceAuth validates the X-Service-Token HMAC-SHA256 header on internal routes.
-// Used to protect endpoints that are only called by other services (gateway BFF, core).
+// ServiceAuth validates X-Service-Token + X-Service-Timestamp on internal routes.
+// Delegates to the canonical shared implementation to ensure consistent error
+// envelope format and HTTP status codes across all services.
 func ServiceAuth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token := r.Header.Get("X-Service-Token")
-		tsStr := r.Header.Get("X-Service-Timestamp")
-
-		if token == "" || tsStr == "" {
-			http.Error(w, `{"ok":false,"error":{"code":"unauthorized","message":"missing service token"}}`,
-				http.StatusUnauthorized)
-			return
-		}
-
-		ts, err := strconv.ParseInt(tsStr, 10, 64)
-		if err != nil || !shared.VerifyServiceToken(token, ts) {
-			http.Error(w, `{"ok":false,"error":{"code":"unauthorized","message":"invalid service token"}}`,
-				http.StatusUnauthorized)
-			return
-		}
-
-		next.ServeHTTP(w, r)
-	})
+	return sharedmw.ServiceAuth(next)
 }

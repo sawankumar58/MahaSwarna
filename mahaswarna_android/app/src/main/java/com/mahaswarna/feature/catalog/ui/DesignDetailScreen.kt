@@ -43,10 +43,8 @@ import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 // ── ViewModel ──────────────────────────────────────────────────────────────────
-//
-// FIX: Original DesignDetailScreen injected CatalogViewModel but never fetched anything —
-// the LaunchedEffect body was empty so [design] remained null forever.
-// Replaced with a dedicated DesignDetailViewModel that actually calls repository.getDesign().
+// Dedicated ViewModel for the design detail screen. Fetches a single design
+// by ID from CatalogRepository and exposes it as a sealed UiState flow.
 
 sealed class DesignDetailUiState {
     data object Loading : DesignDetailUiState()

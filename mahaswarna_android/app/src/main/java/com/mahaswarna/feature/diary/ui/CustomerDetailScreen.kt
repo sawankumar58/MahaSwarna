@@ -31,6 +31,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
+import com.mahaswarna.core.util.InrFormatter
 import com.mahaswarna.navigation.Route
 
 /**
@@ -131,8 +132,8 @@ private fun DetailRow(label: String, value: String) {
 @Composable
 private fun BalanceSectionHeader(balance: Double) {
     val label = when {
-        balance > 0.01  -> "Customer owes ₹${String.format("%.2f", balance)}"
-        balance < -0.01 -> "Shop owes ₹${String.format("%.2f", -balance)}"
+        balance > 0.01  -> "Customer owes ${InrFormatter.formatPrice(balance)}"
+        balance < -0.01 -> "Shop owes ${InrFormatter.formatPrice(-balance)}"
         else            -> "Account settled"
     }
     val color = when {

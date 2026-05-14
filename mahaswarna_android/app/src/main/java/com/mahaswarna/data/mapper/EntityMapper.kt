@@ -6,13 +6,15 @@ import com.mahaswarna.feature.home.data.HomeResponse
 import com.mahaswarna.feature.home.data.RateDto
 import com.mahaswarna.feature.home.domain.HomeData
 import com.mahaswarna.feature.home.domain.RateInfo
+import com.mahaswarna.feature.rates.data.remote.RateDto as RatesFeatureRateDto
+import com.mahaswarna.feature.rates.data.remote.RateHistoryPointDto
 import com.mahaswarna.feature.rates.domain.Rate
+import com.mahaswarna.feature.rates.domain.RateHistoryPoint
 import com.mahaswarna.local.entity.AlertEntity
 import com.mahaswarna.local.entity.HomeEntity
 import com.mahaswarna.local.entity.RateEntity
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
-
 // ── Private JSON instance ──────────────────────────────────────────────────
 // Lenient so new fields added server-side don't crash existing clients.
 private val json = Json { ignoreUnknownKeys = true; coerceInputValues = true }
@@ -134,4 +136,41 @@ fun HomeEntity.toAlertList(): List<Alert> = runCatching {
 fun HomeResponse.toDomain(): HomeData = HomeData(
     rate   = rates.toDomain(),
     alerts = alerts?.map { it.toDomain() } ?: emptyList(),
+)
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Rate (rates feature domain) ↔ DTO / Entity converters
+// These replace the four private toDomain() functions that were inside
+// RatesRepository. All converters are now consolidated here so there is
+// a single source of truth for Rate ↔ entity mappings.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Network DTO (rates feature) → Rate domain model. */
+fun RatesFeatureRateDto.toRateDomain(): Rate = Rate(
+    cityId      = cityId,
+    gold        = gold,
+    silver      = silver,
+    source      = source,
+    generatedAt = generatedAt,
+    isStale     = stale,
+)
+
+/** Room entity → Rate domain model (rates feature path). */
+fun RateEntity.toRateDomain(): Rate = Rate(
+    cityId      = cityId,
+    gold        = gold,
+    silver      = silver,
+    source      = source,
+    generatedAt = generatedAt,
+    isStale     = isStale,
+)
+
+/** Rate history point DTO → domain model. */
+fun RateHistoryPointDto.toDomain(): RateHistoryPoint = RateHistoryPoint(
+    gold        = gold,
+    silver      = silver,
+    source      = source,
+    generatedAt = generatedAt,
+    isStale     = stale,
 )

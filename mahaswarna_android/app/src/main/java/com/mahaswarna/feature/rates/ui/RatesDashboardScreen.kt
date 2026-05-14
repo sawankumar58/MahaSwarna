@@ -19,6 +19,7 @@ import com.google.firebase.analytics.ktx.analytics
 import com.google.firebase.analytics.ktx.logEvent
 import com.google.firebase.ktx.Firebase
 import com.mahaswarna.components.StaleRateBanner
+import com.mahaswarna.core.util.InrFormatter
 import com.mahaswarna.core.network.ApiConstants
 import com.mahaswarna.navigation.Route
 
@@ -221,7 +222,7 @@ private fun MetalRateCard(
             }
             Spacer(Modifier.height(8.dp))
             Text(
-                text = "₹${String.format("%,.2f", rate)} $unit",
+                text = "${InrFormatter.formatRateShort(rate)} $unit",
                 style = MaterialTheme.typography.headlineMedium,
             )
             Spacer(Modifier.height(4.dp))

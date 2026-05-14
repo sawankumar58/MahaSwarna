@@ -23,8 +23,6 @@ const (
 // RunHeartbeat starts a ping loop for conn. It returns when the connection
 // is dead (ping failure or context cancellation).
 //
-// SMELL-3 FIX: RunHeartbeat no longer accepts an onClose callback and no longer
-// removes the connection from the registry or calls conn.Close().
 // Connection lifecycle is owned exclusively by ws_server.go's readLoop defer:
 //
 //	defer func() {
@@ -32,11 +30,11 @@ const (
 //	    conn.Close()
 //	}()
 //
-// How the hand-off works: when RunHeartbeat fails to send a ping (conn is dead),
-// it returns without closing. The read deadline it previously set on the conn
-// (via SetReadDeadline) means the next ReadMessage in readLoop returns a deadline
-// error within ≤40s, triggering the single authoritative cleanup path.
-// This eliminates the race where both goroutines called Remove+Close on the same conn.
+// When RunHeartbeat fails to send a ping (conn is dead), it returns without
+// closing. The read deadline set on the conn causes the next ReadMessage in
+// readLoop to return a deadline error within ≤40s, triggering the single
+// authoritative cleanup path. This eliminates the race where both goroutines
+// call Remove+Close on the same conn.
 func RunHeartbeat(conn *websocket.Conn) {
 	// Set initial read deadline and pong handler BEFORE the first ping tick.
 	conn.SetReadDeadline(time.Now().Add(readDeadline))

@@ -15,6 +15,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.json.Json
+import com.mahaswarna.data.mapper.toRateDomain
+import com.mahaswarna.data.mapper.toDomain
 import kotlinx.serialization.json.decodeFromJsonElement
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -55,7 +57,14 @@ class RatesRepository @Inject constructor(
             .filter { it.channel == "rates" }
             .map { envelope ->
                 val payload = json.decodeFromJsonElement<WsRatePayload>(envelope.payload)
-                payload.toDomain().also { rate ->
+                Rate(
+                    cityId      = payload.cityId,
+                    gold        = payload.gold,
+                    silver      = payload.silver,
+                    source      = payload.source,
+                    generatedAt = payload.generatedAt,
+                    isStale     = payload.stale,
+                ).also { rate ->
                     _currentRate.value = rate
                     rateDao.upsertRate(rate.toRoomEntity())
                 }
@@ -69,7 +78,7 @@ class RatesRepository @Inject constructor(
      */
     suspend fun getRate(cityId: String): Rate {
         val dto = ratesApi.getRate(cityId)
-        val rate = dto.toDomain()
+        val rate = dto.toRateDomain()
         _currentRate.value = rate
         rateDao.upsertRate(rate.toRoomEntity())
         return rate
@@ -91,45 +100,9 @@ class RatesRepository @Inject constructor(
      * Returns null if no cached value exists yet.
      */
     fun cachedRateFlow(cityId: String): Flow<Rate?> =
-        rateDao.getLatest(cityId).map { entity -> entity?.toDomain() }
+        rateDao.getLatest(cityId).map { entity -> entity?.toRateDomain() }
 
-    // ── Converters ────────────────────────────────────────────────────────────
 
-    private fun com.mahaswarna.feature.rates.data.remote.RateDto.toDomain() = Rate(
-        cityId      = cityId,
-        gold        = gold,
-        silver      = silver,
-        source      = source,
-        generatedAt = generatedAt,
-        isStale     = stale,
-    )
-
-    private fun com.mahaswarna.feature.rates.data.remote.RateHistoryPointDto.toDomain() =
-        RateHistoryPoint(
-            gold        = gold,
-            silver      = silver,
-            source      = source,
-            generatedAt = generatedAt,
-            isStale     = stale,
-        )
-
-    private fun WsRatePayload.toDomain() = Rate(
-        cityId      = cityId,
-        gold        = gold,
-        silver      = silver,
-        source      = source,
-        generatedAt = generatedAt,
-        isStale     = stale,
-    )
-
-    private fun com.mahaswarna.local.entity.RateEntity.toDomain() = Rate(
-        cityId      = cityId,
-        gold        = gold,
-        silver      = silver,
-        source      = source,
-        generatedAt = generatedAt,
-        isStale     = isStale,
-    )
 }
 
 /** Deserialized WS rates-channel payload. Shape matches backend ws_rates_message.go. */

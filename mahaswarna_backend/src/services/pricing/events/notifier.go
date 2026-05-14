@@ -2,37 +2,28 @@ package events
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	contractsevents "github.com/mahaswarna/contracts/events"
+	"github.com/mahaswarna/infrastructure/pgnotify"
 )
 
 // Notifier fires PostgreSQL NOTIFY on rate domain events.
+// Embeds pgnotify.Notifier so the base Notify() method is not re-implemented here.
 // Subscribers (redis_fanout.go, core alerts job) LISTEN on these channels.
 type Notifier struct {
-	db *pgxpool.Pool
+	*pgnotify.Notifier
 }
 
+// NewNotifier creates a pricing Notifier backed by the canonical pgnotify implementation.
 func NewNotifier(db *pgxpool.Pool) *Notifier {
-	return &Notifier{db: db}
-}
-
-func (n *Notifier) notify(ctx context.Context, channel string, payload any) error {
-	b, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("notifier marshal %s: %w", channel, err)
-	}
-	// SECURITY: channel is an internal constant from contracts/events — never user-supplied.
-	_, err = n.db.Exec(ctx, "SELECT pg_notify($1, $2)", channel, string(b))
-	return err
+	return &Notifier{Notifier: pgnotify.NewNotifier(db)}
 }
 
 // NotifyRateUpdated fires after a successful rate write.
 // Consumed by redis_fanout.go → WebSocket clients and core alerts threshold evaluator.
 func (n *Notifier) NotifyRateUpdated(ctx context.Context, cityID string, gold, silver float64, stale bool) error {
-	return n.notify(ctx, contractsevents.ChannelRateUpdated, contractsevents.RateUpdatedPayload{
+	return n.Notify(ctx, contractsevents.ChannelRateUpdated, contractsevents.RateUpdatedPayload{
 		CityID: cityID,
 		Gold:   gold,
 		Silver: silver,
@@ -43,7 +34,7 @@ func (n *Notifier) NotifyRateUpdated(ctx context.Context, cityID string, gold, s
 // NotifyRateStale fires when a city's snapshot is marked stale.
 // Consumed by Alertmanager → SEV-2 PagerDuty integration.
 func (n *Notifier) NotifyRateStale(ctx context.Context, cityID, metal, reason string) error {
-	return n.notify(ctx, contractsevents.ChannelRateStale, contractsevents.RateStalePayload{
+	return n.Notify(ctx, contractsevents.ChannelRateStale, contractsevents.RateStalePayload{
 		CityID: cityID,
 		Metal:  metal,
 		Reason: reason,
@@ -56,7 +47,7 @@ func (n *Notifier) NotifyRateStale(ctx context.Context, cityID, metal, reason st
 // (e.g. during migration or cold-start before trigger is applied).
 // Consumed by: redis_fanout.go → BufferedFanout → WebSocket clients (rates channel).
 func (n *Notifier) NotifyAIRateSnapshotReady(ctx context.Context, cityID string, gold, silver float64, stale bool, source string) error {
-	return n.notify(ctx, contractsevents.ChannelAIRateSnapshotReady, contractsevents.AIRateSnapshotReadyPayload{
+	return n.Notify(ctx, contractsevents.ChannelAIRateSnapshotReady, contractsevents.AIRateSnapshotReadyPayload{
 		CityID: cityID,
 		Gold:   gold,
 		Silver: silver,

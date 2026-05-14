@@ -17,6 +17,7 @@ import com.mahaswarna.components.StaleRateBanner
 import com.mahaswarna.feature.home.domain.HomeData
 import com.mahaswarna.feature.home.domain.RateInfo
 import com.mahaswarna.navigation.Route
+import com.mahaswarna.core.util.InrFormatter
 import kotlinx.coroutines.launch
 import kotlin.random.Random
 import com.mahaswarna.feature.flags.data.FlagsRepository
@@ -151,7 +152,7 @@ private fun RateRow(label: String, rate: Double, unit: String) {
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
         Text(label, style = MaterialTheme.typography.bodyLarge)
-        Text("₹${String.format("%.2f", rate)} $unit", style = MaterialTheme.typography.bodyLarge)
+        Text("${InrFormatter.formatRateShort(rate)} $unit", style = MaterialTheme.typography.bodyLarge)
     }
 }
 

@@ -16,11 +16,8 @@ import javax.inject.Singleton
 /**
  * All Retrofit API bindings.
  *
- * FIX (Phase 4): Added [CatalogApi] and [MarketplaceApi] @Provides.
- * Both were missing from the original ApiModule — Hilt would fail at compile time
- * with MissingBinding errors for CatalogRepository and MarketplaceRepository.
- *
- * All APIs share the primary [Retrofit] instance from [NetworkModule] (with AuthInterceptor).
+ * [CatalogApi] and [MarketplaceApi] are provided here alongside the other service
+ * APIs. All share the primary [Retrofit] instance from [NetworkModule] (with AuthInterceptor).
  * The S3 client ([Named("s3")]) is injected directly into [ShopViewModel] — not here.
  */
 @Module

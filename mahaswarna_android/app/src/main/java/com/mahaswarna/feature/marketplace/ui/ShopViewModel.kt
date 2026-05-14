@@ -45,9 +45,9 @@ class ShopViewModel @Inject constructor(
     private val registerShopUseCase: RegisterShopUseCase,
     private val getBannerUploadUrlUseCase: GetBannerUploadUrlUseCase,
     private val confirmBannerUseCase: ConfirmBannerUseCase,
-    // FIX: must use @Named("s3") OkHttpClient — this client has NO AuthInterceptor.
-    // The primary OkHttpClient adds a Bearer token header which S3 presigned URLs
-    // reject with 400 SignatureDoesNotMatch. Use the dedicated S3 client.
+    // The @Named("s3") OkHttpClient has no AuthInterceptor — required for S3
+    // presigned URL uploads. The primary client adds a Bearer token header that
+    // S3 presigned URLs reject with 400 SignatureDoesNotMatch.
     @Named("s3") private val s3HttpClient: OkHttpClient,
 ) : ViewModel() {
 

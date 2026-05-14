@@ -53,16 +53,15 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import com.mahaswarna.core.util.InrFormatter
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import javax.inject.Inject
 
 // ── ViewModel ──────────────────────────────────────────────────────────────────
-//
-// FIX: Previous version defined a conflicting flatMapLatest extension function
-// in the same file that shadowed kotlinx.coroutines.flow.flatMapLatest, causing
-// compile errors. ViewModel is now clean — standard API only.
+// Uses the standard kotlinx.coroutines.flow.flatMapLatest API to keep the
+// ledger entries in sync with the active customer ID.
 
 @OptIn(ExperimentalCoroutinesApi::class)
 @HiltViewModel
@@ -88,7 +87,6 @@ class CustomerLedgerViewModel @Inject constructor(
         )
 
     fun addEntry(customerId: String, type: String, amountInr: Double, description: String) {
-        // FIX: missing `import kotlinx.coroutines.launch` in original — now explicit above
         viewModelScope.launch {
             addLedgerEntryUseCase(
                 AddLedgerEntryUseCase.Input(
@@ -172,8 +170,8 @@ fun CustomerLedgerDetailScreen(
 @Composable
 private fun BalanceSummaryCard(netBalance: Double) {
     val (label, color) = when {
-        netBalance > 0.01  -> "Customer owes ₹${String.format("%.2f", netBalance)}" to Color(0xFFB71C1C)
-        netBalance < -0.01 -> "Shop owes ₹${String.format("%.2f", -netBalance)}"    to Color(0xFF1B5E20)
+        netBalance > 0.01  -> "Customer owes ${InrFormatter.formatPrice(netBalance)}" to Color(0xFFB71C1C)
+        netBalance < -0.01 -> "Shop owes ${InrFormatter.formatPrice(-netBalance)}" to Color(0xFF1B5E20)
         else               -> "Account settled"                                       to MaterialTheme.colorScheme.onSurfaceVariant
     }
     Card(
@@ -200,8 +198,8 @@ private fun LedgerEntryRow(entry: LedgerEntry) {
             Text(dateFmt.format(Date(entry.createdAt)), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Text(
-            text       = if (entry.type == "credit") "+₹${String.format("%.2f", entry.amountInr)}"
-                         else "-₹${String.format("%.2f", entry.amountInr)}",
+            text       = if (entry.type == "credit") "+${InrFormatter.formatPrice(entry.amountInr)}"
+                         else "-${InrFormatter.formatPrice(entry.amountInr)}",
             color      = if (entry.type == "credit") Color(0xFF1B5E20) else Color(0xFFB71C1C),
             style      = MaterialTheme.typography.bodyMedium,
             fontWeight = FontWeight.Medium,

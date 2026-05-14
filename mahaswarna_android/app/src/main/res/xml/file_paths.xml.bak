@@ -1,6 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!-- FileProvider paths for invoice PDF sharing -->
-<paths>
-    <cache-path name="invoice_pdfs" path="invoices/" />
-</paths>
-

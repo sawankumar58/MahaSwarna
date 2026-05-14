@@ -38,17 +38,9 @@ sealed class LoginState {
 /**
  * OTP login ViewModel.
  *
- * FIX (deployment blocker — Play Integrity nonce):
- *   The original code used an inline integrity call with:
- *       IntegrityTokenRequest.builder().setNonce("mahaswarna-${System.currentTimeMillis()}")
- *   This is a plain ASCII timestamp — not base64-encoded.
- *   Play Integrity requires nonces to be base64url-encoded, 16–500 bytes.
- *   Result: IntegrityServiceException: NONCE_IS_NOT_BASE64 on every login attempt,
- *   breaking login for all users on first install.
- *
- *   Fix: inject PlayIntegrityVerifier (already @Singleton, already used correctly
- *   by the billing path). Call generateNonce() for a SecureRandom 32-byte base64url
- *   nonce, then pass it to requestToken(nonce). Eliminates duplicate logic too.
+ * Play Integrity nonce: uses PlayIntegrityVerifier.generateNonce() to produce a
+ * SecureRandom 32-byte base64url-encoded nonce, satisfying the 16–500 byte
+ * base64url requirement. Nonce is then passed to requestToken(nonce).
  *
  * Flow (Firebase path):
  *   1. User enters phone → sendOtp(phone, activity)
@@ -103,10 +95,8 @@ class LoginViewModel @Inject constructor(
         _state.value = LoginState.SendingOtp
         viewModelScope.launch {
             // Step 1 — Play Integrity token.
-            // FIX: generate a SecureRandom base64url nonce via generateNonce(), then
-            // pass it to requestToken(nonce: String). The original code passed a plain
-            // timestamp string directly to IntegrityTokenRequest.setNonce() — not
-            // base64-encoded — causing NONCE_IS_NOT_BASE64 for every login attempt.
+            // generateNonce() returns a SecureRandom base64url-encoded nonce, which is
+            // passed to requestToken(). IntegrityTokenRequest requires base64 encoding.
             val integrityToken = runCatching {
                 val nonce = playIntegrityVerifier.generateNonce()
                 playIntegrityVerifier.requestToken(nonce)

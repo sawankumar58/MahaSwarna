@@ -105,7 +105,6 @@ private fun BillCard(bill: DiaryBill) {
                     )
                 }
                 Column(horizontalAlignment = Alignment.End) {
-                    // FIX: InrFormatter.format() does not exist — use formatPrice()
                     Text(InrFormatter.formatPrice(bill.totalInr), style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                     Text(dateFmt.format(Date(bill.createdAt)), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }

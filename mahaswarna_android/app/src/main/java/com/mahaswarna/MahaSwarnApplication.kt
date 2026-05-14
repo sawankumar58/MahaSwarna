@@ -19,18 +19,12 @@ import dagger.hilt.android.HiltAndroidApp
  *   Step 3 — Firebase auto-init (google-services plugin handles this automatically)
  *   Step 4 — Sentry init (after super so Hilt graph + app context are fully ready)
  *
- * FIX (deployment blocker — Sentry DSN):
- *   The original code referenced BuildConfig.SENTRY_DSN_PLACEHOLDER, which had no
- *   corresponding buildConfigField(...) declaration in build.gradle.kts. This is
- *   a compile error in strict mode, or produces an empty string at runtime, causing
- *   Sentry to silently capture nothing in production — crashes go undetected.
- *
- *   Fix: reference BuildConfig.SENTRY_DSN, which is declared via buildConfigField
- *   in build.gradle.kts for each build type:
- *     debug   → "" (Sentry no-ops; avoids polluting prod project with dev noise)
- *     staging → overridden in CI from SENTRY_DSN_STAGING secret
- *     release → overridden in CI from SENTRY_DSN_RELEASE secret
- *   Sentry gracefully no-ops when DSN is blank.
+ * Sentry DSN: references BuildConfig.SENTRY_DSN, declared via buildConfigField
+ * in build.gradle.kts for each build type:
+ *   debug   → "" (Sentry no-ops; avoids polluting prod project with dev noise)
+ *   staging → overridden in CI from SENTRY_DSN_STAGING secret
+ *   release → overridden in CI from SENTRY_DSN_RELEASE secret
+ * Sentry gracefully no-ops when DSN is blank.
  *
  * TokenStore is NOT accessed here. On post-reboot cold start, first Keystore TEE
  * access takes 50–200ms on budget devices. Calling it in onCreate() consumes the

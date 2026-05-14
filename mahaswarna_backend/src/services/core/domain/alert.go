@@ -16,7 +16,7 @@ type Alert struct {
 
 const (MetalGold = "gold"; MetalSilver = "silver"; DirectionAbove = "above"; DirectionBelow = "below")
 
-// FCMAlertPayload: ALL 6 fields required. "direction" was missing in old PRD §9 — this is canonical.
+// FCMAlertPayload defines all 6 required fields for FCM data-message alerts.
 type FCMAlertPayload struct {
 	Type      string `json:"type"`
 	Metal     string `json:"metal"`

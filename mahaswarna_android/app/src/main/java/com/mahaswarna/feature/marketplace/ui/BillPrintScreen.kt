@@ -204,7 +204,7 @@ fun BillPrintScreen(
 
                     if (goldRate != null && goldRate > 0.0) {
                         Text(
-                            text  = "Rate snapshot: Gold ₹${String.format("%.0f", goldRate)}/g",
+                            text  = "Rate snapshot: Gold ${InrFormatter.formatRateShort(goldRate)}/g",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )

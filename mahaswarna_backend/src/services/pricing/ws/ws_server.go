@@ -104,10 +104,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	slog.Debug("ws: connection opened", "user_id", userID)
 
-	// SMELL-3 FIX: connection lifecycle is owned exclusively by readLoop's defer.
 	// RunHeartbeat signals liveness only — it returns on ping failure but does NOT
-	// close the connection or remove from registry. The read deadline it sets on
-	// the conn causes readLoop's next ReadMessage to fail, which triggers the
+	// close the connection or remove it from the registry. The read deadline it sets
+	// on the conn causes readLoop's next ReadMessage to fail, which triggers the
 	// single authoritative cleanup path in readLoop's defer.
 	go RunHeartbeat(conn)
 

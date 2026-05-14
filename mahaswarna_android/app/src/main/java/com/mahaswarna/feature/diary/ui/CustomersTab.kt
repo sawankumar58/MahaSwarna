@@ -113,7 +113,6 @@ private fun CustomerCard(item: CustomerWithBalance, onClick: () -> Unit) {
 
 @Composable
 private fun BalanceBadge(balance: Double) {
-    // FIX: InrFormatter has no .format() — use .formatPrice()
     val (text, color) = when {
         balance > 0.01  -> InrFormatter.formatPrice(balance)  to Color(0xFFB71C1C)
         balance < -0.01 -> InrFormatter.formatPrice(-balance) to Color(0xFF1B5E20)

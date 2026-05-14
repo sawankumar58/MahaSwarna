@@ -53,8 +53,8 @@ func (h *RatesHandler) GetRate(w http.ResponseWriter, r *http.Request) {
 //
 //	gold, silver, source, generatedAt, stale  (RateHistoryPoint schema)
 //
-// BUG-2 FIX: contracts/http.RateDataPoint only maps Gold+Silver+Timestamp.
-// Using a local type prevents schema drift if RateDataPoint changes upstream.
+// A local type is used instead of contracts/http.RateDataPoint to prevent
+// schema drift if the shared contract changes upstream.
 type rateHistoryPoint struct {
 	Gold        float64 `json:"gold"`
 	Silver      float64 `json:"silver"`
@@ -91,9 +91,8 @@ func (h *RatesHandler) GetHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// BUG-2 FIX: map all fields required by the OpenAPI RateHistoryPoint schema —
-	// gold, silver, source, generatedAt, stale. Previously only Gold+Silver+Timestamp
-	// were mapped via contractshttp.RateDataPoint, which omitted source and stale.
+	// Map all fields required by the OpenAPI RateHistoryPoint schema:
+	// gold, silver, source, generatedAt, stale.
 	// The Android RateHistoryScreen uses source for analytics and stale for the banner.
 	points := make([]rateHistoryPoint, len(snaps))
 	for i, s := range snaps {

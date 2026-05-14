@@ -107,13 +107,13 @@ func (f *BufferedFanout) flush() {
 			continue
 		}
 
-		// BUG-4 FIX: derive source from the actual snapshot payload, not a hardcoded
-		// "gemini" string. The notifier sets Source from domain.SourceGemini,
-		// domain.SourceManualOverride, etc. Stale overrides source to "stale" so the
-		// Android StaleRateBanner renders regardless of the underlying source.
+		// Derive source from the snapshot payload. The notifier sets Source from
+		// domain.SourceGemini, domain.SourceManualOverride, etc. Stale overrides
+		// source to "stale" so the Android StaleRateBanner renders regardless of
+		// the underlying source.
 		//
-		// OpenAPI invariant: "NEVER hardcode \"gemini\" as a string literal —
-		// always derive from rate.source." This fixes the manual_override path.
+		// OpenAPI invariant: never hardcode "gemini" as a string literal —
+		// always derive from rate.source.
 		source := p.Source
 		if p.Stale {
 			source = "stale"
@@ -138,5 +138,3 @@ func (f *BufferedFanout) flush() {
 		}
 	}
 }
-// SMELL-2 REMOVED: RegisterListener was dead code — main.go wires the fanout handler
-// directly via fanoutListener.On(...). Removed to avoid confusion about the wiring path.

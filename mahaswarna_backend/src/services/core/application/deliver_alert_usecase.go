@@ -29,7 +29,7 @@ func (uc *DeliverAlertUseCase) Deliver(ctx context.Context, alert domain.Alert, 
 	deviceTokens, _ := uc.tokens.GetTokensForUser(ctx, alert.UserID)
 	if len(deviceTokens) == 0 { return fmt.Errorf("no tokens for user %s", alert.UserID) }
 
-	// FCM data payload — ALL 6 FIELDS REQUIRED (canonical source).
+	// FCM data payload — all 6 fields are required by the FCMAlertPayload contract.
 	data := map[string]string{
 		"type":      "price_alert",
 		"metal":     alert.Metal,

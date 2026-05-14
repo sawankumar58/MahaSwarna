@@ -7,10 +7,9 @@ import (
 	"github.com/mahaswarna/core/domain"
 )
 
-// TestDeliverAlertUseCase_FCMPayloadFields verifies that ALL 6 required FCM
+// TestDeliverAlertUseCase_FCMPayloadFields verifies that all 6 required FCM
 // data fields are present in the payload map built by Deliver().
-// Architecture invariant (canonical source): "direction" was missing in old PRD
-// §9. This test catches any regression that drops a field.
+// This test catches regressions that add or drop fields from the FCM payload.
 func TestDeliverAlertUseCase_FCMPayloadFields(t *testing.T) {
 	alert := domain.Alert{
 		Metal:     domain.MetalGold,

@@ -21,9 +21,8 @@ import javax.inject.Singleton
  *   - Network failure → serve from Room cache if available (page 1 only).
  *   - Image search is NOT cached (results are query-specific and stateless).
  *
- * FIX: Previous version defined a private `first(Flow<T>)` extension that called
- * itself recursively (infinite loop). Replaced with the standard `kotlinx.coroutines.flow.first`
- * imported at the top of the file.
+ * Uses the standard `kotlinx.coroutines.flow.first` extension to await the first
+ * emission from the DesignDao observable on cache fallback.
  */
 @Singleton
 class CatalogRepository @Inject constructor(
@@ -51,7 +50,6 @@ class CatalogRepository @Inject constructor(
             dto.toDomain()
         }.getOrElse { networkError ->
             if (page != 1) throw networkError          // only fall back for page-1
-            // FIX: use imported kotlinx.coroutines.flow.first — not a self-recursive helper
             val cached = designDao.observeAll().first()
             val filtered = cached.filter { entity ->
                 (metalType.isBlank() || entity.metal == metalType) &&
